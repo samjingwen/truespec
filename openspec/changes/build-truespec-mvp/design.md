@@ -46,7 +46,8 @@ File hashes alone cannot distinguish identical files, and inferred rename matchi
 
 ### Build a single render and anchor model
 
-Use `pulldown-cmark` with source offsets and GFM support to build safe HTML, stable heading fragments for navigation, and a run map for selectable text.
+Use the Rust `pulldown-cmark` crate with source offsets and GitHub Flavored Markdown extensions for tables, strikethrough, and task lists.
+The shared renderer builds safe HTML, stable heading fragments for navigation, and a run map for selectable text.
 Translate the browser's selection endpoints through that run map, validating the revision and UTF-16 offsets on the server.
 Build a separate line index over the same runs so new line targets do not change run IDs used by existing text selections.
 Collect paragraph and outer list spans from the Markdown parser and derive section bounds from heading levels.
