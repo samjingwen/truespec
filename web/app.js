@@ -484,6 +484,34 @@ function statusBadge(label, type) {
   return node("span", `status ${type || ""}`.trim(), label);
 }
 
+function deliveryIndicator(item) {
+  const done = item.delivery === "replied" || item.delivery === "completed";
+  const retry = item.delivery === "retry" || item.delivery === "connector_retry";
+  const label = {
+    queued: item.connector ? `Queued for ${item.connector}` : "Waiting for agent",
+    received: "Agent working",
+    delivered: "Agent working",
+    retry: "Waiting for agent retry",
+    connector_retry: "Retrying agent delivery",
+    replied: "Agent done",
+    completed: "Agent done",
+  }[item.delivery];
+  const indicator = node(
+    "span",
+    `delivery-indicator ${done ? "done" : "working"}${retry ? " warning" : ""}`,
+  );
+  indicator.setAttribute("role", "status");
+  indicator.setAttribute("aria-label", label);
+  indicator.title = label;
+  if (done) {
+    indicator.innerHTML =
+      '<svg viewBox="0 0 20 20" aria-hidden="true"><path d="m5.25 10.3 3.05 3.05 6.45-6.7" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+  } else {
+    indicator.append(node("span", "delivery-spinner"));
+  }
+  return indicator;
+}
+
 function renderAgentReply(reply) {
   const row = node("div", "annotation agent-reply");
   row.dataset.replyId = reply.id;
@@ -604,15 +632,7 @@ function renderReview() {
     if (item.location.status === "missing") badges.append(statusBadge("Source missing", "warning"));
     if (item.location.status === "relocated") badges.append(statusBadge("Relocated", "neutral"));
     if (item.delivery) {
-      badges.append(statusBadge({
-        queued: item.connector ? `Queued for ${item.connector}` : "Queued · waiting for agent",
-        received: "Received",
-        retry: "Queued · previous attempt expired",
-          connector_retry: "Queued · retrying delivery",
-          delivered: item.connector ? `Delivered to ${item.connector}` : "Delivered",
-          replied: "Agent replied",
-          completed: "Agent completed",
-      }[item.delivery], item.delivery.endsWith("retry") ? "warning" : "neutral"));
+      badges.append(deliveryIndicator(item));
       badges.append(statusBadge(item.resolved ? "Resolved" : "Unresolved", item.resolved ? "" : "neutral"));
     }
     if (badges.childElementCount) row.append(badges);

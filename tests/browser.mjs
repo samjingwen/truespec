@@ -536,8 +536,10 @@ async function exercise(mode, width) {
       check(await page.eval(() => document.querySelector("#handoff").hidden && document.querySelector("#line-composer").hidden), "Ended reviews must be read-only");
       check(await page.eval(() => document.querySelectorAll("#review-list > .annotation").length === ${mode === "markdown" ? 7 : 6}),
         "All sent items remain in the unified feed");
-      check(await page.eval(() => [...document.querySelectorAll("#review-list > .annotation")].every(item =>
-        item.querySelector(".annotation-status").textContent.includes("Queued"))), "Display the disconnected queue accurately");
+      check(await page.eval(() => [...document.querySelectorAll("#review-list > .annotation")].every(item => {
+        const indicator = item.querySelector(".delivery-indicator.working");
+        return indicator?.getAttribute("aria-label") === "Waiting for agent";
+      })), "Display a labeled working spinner while no agent is connected");
     `);
     await stop(viewer);
 
@@ -589,8 +591,8 @@ async function exercise(mode, width) {
       await showPanel("review");
       await page.wait("#ended:not([hidden])");
       check(await page.eval(() => [...document.querySelectorAll(".annotation-status")].length === ${mode === "markdown" ? 7 : 6} &&
-        [...document.querySelectorAll(".annotation-status")].every(item => item.textContent.includes("Agent completed")
-          && item.textContent.includes("Unresolved"))), "Completion should never resolve comments");
+        [...document.querySelectorAll(".annotation-status")].every(item => item.querySelector(".delivery-indicator.done")?.getAttribute("aria-label") === "Agent done"
+          && item.textContent.includes("Unresolved"))), "A green done icon should never resolve comments");
     `);
     console.log(`Verified ${mode} browser-to-agent handoff at ${width}px.`);
   } finally {
@@ -658,7 +660,7 @@ async function verifyMirroredReply() {
           && reply.querySelector("strong").textContent === "requested change"
           && !reply.querySelector("script")
           && reply.querySelector(".reply-references summary").textContent === "Regarding 1 comment"
-          && document.querySelector(".annotation-status").textContent.includes("Agent replied")
+          && document.querySelector(".annotation-status .delivery-indicator.done")?.getAttribute("aria-label") === "Agent done"
           && document.querySelector(".annotation-status").textContent.includes("Unresolved");
       }), "A safe, unread agent reply is mirrored once and linked without resolving its comment");
       await page.click(".reply-reference");

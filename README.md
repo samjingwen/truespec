@@ -174,7 +174,8 @@ Drafts use a dashed outline and remain editable or removable.
 - With no drafts, **Send and End** only ends the review.
 
 Submitted items remain in their chronological positions.
-Their badges change to Queued, Received, Delivered, Completed, Resolved, or retry state as appropriate.
+Delivery shows a labeled spinner while the agent is waiting or working and a green check after the agent replies or records completion.
+Reviewer resolution remains a separate **Unresolved / Resolved** state.
 Agent completion never resolves a comment automatically.
 
 ### 4. Review updated Markdown
@@ -237,7 +238,7 @@ Sending does not interrupt a running OpenCode turn.
 It queues the review batch in the session inbox.
 Ending TrueSpec does not close the OpenCode chat.
 OpenCode remains the canonical conversation; the browser reply is a read-only mirror linked to that batch.
-An agent reply marks comments replied, but never resolves them automatically.
+An agent reply shows the green done indicator, but never resolves comments automatically.
 
 ### Develop with the repository-local plugin
 

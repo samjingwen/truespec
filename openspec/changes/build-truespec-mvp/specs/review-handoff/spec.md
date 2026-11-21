@@ -141,7 +141,7 @@ Mirroring a reply SHALL NOT resolve reviewer comments.
 
 - **WHEN** the paired OpenCode turn reaches idle with a completed assistant response
 - **THEN** the plugin stores the final assistant Markdown as one agent reply bubble for that batch
-- **AND** the browser marks the linked comments **Agent replied**
+- **AND** the browser replaces their working spinner with an accessible green done icon
 
 #### Scenario: Retry response mirroring
 
@@ -154,3 +154,10 @@ Mirroring a reply SHALL NOT resolve reviewer comments.
 - **WHEN** a new agent reply arrives while the Review panel is closed
 - **THEN** the Review edge tab shows an unread indicator
 - **AND** opening Review clears the indicator without resolving any comment
+
+#### Scenario: Distinguish agent work from reviewer resolution
+
+- **WHEN** feedback is queued, delivered, retried, or being handled
+- **THEN** the browser shows a spinner with an accessible state label
+- **AND** an agent reply or recorded completion replaces it with a green done icon
+- **AND** **Unresolved / Resolved** remains a separate reviewer-controlled state

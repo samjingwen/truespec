@@ -26,7 +26,7 @@
 - [x] 3.1 Persist sessions, immutable batch snapshots, and submission idempotency; verify submission without an agent, stale-draft confirmation, and unchanged snapshots after source edits.
 - [x] 3.2 Add **Send** and **Send and End**; test transactional failure recovery, ending an empty review, read-only ended tabs, and explicit new reviews.
 - [x] 3.3 Implement the inbox adapter and `poll`, `ack`, and `complete` commands; verify concurrent claims, receipt and renewal, partial completion, lease expiry, and recovery while the viewer is offline.
-- [x] 3.4 Show delivery state and user-controlled resolution separately; verify an agent completion never resolves an annotation.
+- [x] 3.4 Show a labeled working spinner and green agent-done icon separately from user-controlled resolution; verify agent completion never resolves an annotation.
 - [x] 3.5 Document and exercise the explicit wait, acknowledge, process, complete, and return-to-chat loop, including the idempotency limits for edits made outside TrueSpec.
 - [x] 3.6 Show a collapsed, copyable agent prompt for unpaired reviews, preserve its disclosure state across refreshes, and hide it for paired connectors.
 
