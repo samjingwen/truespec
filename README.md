@@ -148,6 +148,11 @@ Turn **Annotate** off when you want every click to behave as ordinary document n
 - Drag across rendered text for an exact selection, then use **Comment on selection**.
 - Type into **Add a general comment...** for feedback without a source annotation.
 
+Comments can be questions, clarification requests, suggestions, or explicit change requests.
+The agent should answer questions without editing Markdown merely because an explanation was requested.
+If the intent is ambiguous, it should ask in the coding chat before changing files.
+If a question reveals a clear documentation defect, the agent may improve it and explain why.
+
 For inline comments:
 
 - **Enter** queues the comment.

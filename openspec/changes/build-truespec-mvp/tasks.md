@@ -41,6 +41,7 @@
 - [x] 5.2 Add the optional no-argument `/truespec-review` command; verify two rounds in one isolated OpenCode chat that updates Markdown at the original TrueSpec URL.
 - [x] 5.3 Add a common connector setup registry and interactive `truespec setup`; verify list, all, repeatable non-interactive selection, global OpenCode placement, binary-path generation, idempotency, and overwrite protection.
 - [x] 5.4 Add durable one-reply-per-batch mirroring; verify OpenCode idle-turn capture, connector idempotency, comment links, unread indication, safe Markdown rendering, persistence, and independent resolution.
+- [x] 5.5 Clarify the two-way review policy in connector prompts and public guidance; distinguish questions, explicit changes, clear documentation defects, and ambiguous intent.
 
 ## 6. Publish the public repository
 

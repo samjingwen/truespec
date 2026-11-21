@@ -98,6 +98,8 @@ An exact repeat of a completed item is a no-op; a stale token cannot complete an
 When no more work remains for an ended review, return an ended result instead of waiting for new messages.
 The agent reads the finalized feedback, returns to the original chat to discuss it, and records handled items separately from user resolution.
 The UI never tries to bring a terminal to the foreground or change an agent's tool state.
+Connector prompts treat review comments as two-way communication: answer questions without unnecessary source edits, perform explicit change requests, and ask before acting on ambiguous intent.
+An answer that exposes a clear documentation defect may include a corrective edit when the agent explains why it was warranted.
 
 ### Pair coding chats through a versioned connector
 

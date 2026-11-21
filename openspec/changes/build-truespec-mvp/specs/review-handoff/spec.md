@@ -80,6 +80,22 @@ It SHALL NOT require a browser conversation to complete work or automatically re
 - **THEN** the CLI indicates that the agent should continue in the original chat rather than wait for more browser messages
 - **AND** the reviewer can later open a new review and resolve or reopen annotations independently of delivery status
 
+### Requirement: Support questions and change requests
+
+Review feedback SHALL support explanations, clarification, suggestions, and requested source changes in the same delivery loop.
+The connector guidance SHALL NOT instruct an agent to edit Markdown merely because the reviewer asked a question.
+
+#### Scenario: Ask for an explanation
+
+- **WHEN** a reviewer asks a question without requesting a source change
+- **THEN** the agent answers in the coding chat and the response is mirrored to TrueSpec
+- **AND** Markdown remains unchanged unless the answer exposes a clear documentation defect that the agent explains
+
+#### Scenario: Receive ambiguous intent
+
+- **WHEN** feedback could reasonably be interpreted as either a question or a change request
+- **THEN** the agent asks for clarification before editing the source
+
 ### Requirement: Pair an existing coding conversation
 
 An optional connector SHALL pair a review with one existing coding conversation using a versioned local contract.
