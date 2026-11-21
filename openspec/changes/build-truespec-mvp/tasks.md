@@ -45,4 +45,4 @@
 ## 6. Publish the public repository
 
 - [x] 6.1 Write the public product, workflow, command, storage, security, architecture, limitation, and development guide; add MIT licensing and repository metadata.
-- [ ] 6.2 Verify a clean checkout, create `samjingwen/truespec` as a public GitHub repository, and push the reviewed `master` branch.
+- [x] 6.2 Verify a clean checkout, create `samjingwen/truespec` as a public GitHub repository, and push the reviewed `master` branch.
