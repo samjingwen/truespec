@@ -10,6 +10,7 @@ It serves an embedded browser UI, stores review state separately, and delivers d
 - Accepted product behavior belongs in `openspec/specs/`.
 - Proposed behavior belongs in `openspec/changes/<change>/specs/` until archive.
 - Archived OpenSpec changes preserve proposal, design, task, and decision history.
+- The accepted coding-harness contract belongs in `openspec/specs/connector-protocol/spec.md`.
 - `README.md` is the public user and command guide.
 - Source Markdown remains authoritative for reviewed documents.
 - Review comments, batches, replies, delivery state, and resolution state never belong in source Markdown.

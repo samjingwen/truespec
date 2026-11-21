@@ -379,7 +379,7 @@ Submitted snapshots keep their historical source paths.
 
 Provides the versioned local protocol used by coding-harness integrations.
 It is normally called by connector implementations rather than by reviewers.
-See [docs/connector.md](docs/connector.md) for attach, poll, delivered, defer, leasing, retry, and receipt semantics.
+See the [connector protocol specification](openspec/specs/connector-protocol/spec.md) for attach, poll, delivered, defer, leasing, retry, reply, and receipt semantics.
 
 Every subcommand also supports the global `--root <PATH>` option where a workspace is required.
 Use `truespec <COMMAND> --help` for the authoritative flags in the installed version.
@@ -429,7 +429,7 @@ The browser assets in `web/` are embedded with `include_str!`.
 There is no generated frontend directory to deploy.
 Rendered document HTML stays in memory.
 
-The connector boundary is documented in [docs/connector.md](docs/connector.md).
+The connector boundary is defined by the [connector protocol specification](openspec/specs/connector-protocol/spec.md).
 OpenCode is one adapter over that protocol, not a dependency of the review core.
 
 ## Current boundaries
@@ -455,6 +455,7 @@ Run the ordinary quality gate:
 cargo fmt --check
 cargo clippy --locked --all-targets -- -D warnings
 cargo test --locked
+openspec validate --all --strict
 ```
 
 Run the real-browser flow for both document adapters:
@@ -477,7 +478,8 @@ That test starts an isolated OpenCode V2 server and deterministic local model fi
 It verifies two review rounds in one real OpenCode chat and confirms that Markdown updates appear at the original TrueSpec URL.
 
 TrueSpec itself is developed with OpenSpec.
-The active MVP change is under [`openspec/changes/build-truespec-mvp`](openspec/changes/build-truespec-mvp/).
+Accepted behavior is under [`openspec/specs/`](openspec/specs/).
+The completed MVP proposal, design, tasks, and decisions are preserved in the [`build-truespec-mvp` archive](openspec/changes/archive/2026-11-21-build-truespec-mvp/).
 
 ## Inspiration
 

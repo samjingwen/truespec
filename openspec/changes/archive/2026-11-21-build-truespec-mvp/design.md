@@ -105,6 +105,7 @@ An answer that exposes a clear documentation defect may include a corrective edi
 ### Pair coding chats through a versioned connector
 
 The local connector protocol exposes attach, poll, delivered, and defer operations over the same review database.
+The `connector-protocol` capability is the normative contract for connector implementations.
 One review pairs with one opaque destination, which is captured on each newly submitted batch.
 Existing manual batches remain separate, and a paired delivery receipt cannot be recorded as a manual acknowledgement.
 Connector claims are ordered and leased; an expired or deferred attempt can retry the same batch without changing its snapshot.

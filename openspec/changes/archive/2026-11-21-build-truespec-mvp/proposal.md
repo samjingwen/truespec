@@ -22,6 +22,7 @@ TrueSpec lets a reviewer collect contextual feedback in the browser and return t
 - `document-reading`: Discover, render, and refresh Markdown from independent document sources without editing the source files.
 - `document-annotations`: Capture source-aware annotations, keep comment and delivery state, and report anchors that need review.
 - `review-handoff`: Submit durable batches, end a browser review without losing work, and hand feedback back to the agent's chat.
+- `connector-protocol`: Pair one coding conversation, deliver immutable batches through a versioned leased protocol, and mirror one durable reply per batch.
 
 ### Modified Capabilities
 
