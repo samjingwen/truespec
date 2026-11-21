@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
+  <meta name="color-scheme" content="light">
+  <title>TrueSpec</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/app.css">
+  <script type="module" src="/app.js"></script>
+</head>
+<body>
+  <a class="skip" href="#reader">Skip to document</a>
+  <header class="app-header">
+    <div class="brand">
+      <img src="/favicon.svg" alt="" width="28" height="28">
+      <span>TrueSpec</span>
+    </div>
+  </header>
+
+  <div id="layout" class="layout" data-documents-open="true" data-review-open="true">
+    <aside id="documents-panel" class="navigation" aria-label="Document navigation">
+      <div class="panel-head">
+        <h2 id="documents-heading" tabindex="-1">Documents <span id="document-count"></span></h2>
+        <button id="documents-close" class="panel-close" type="button" aria-controls="documents-panel" aria-label="Collapse Documents">
+          <svg viewBox="0 0 20 20" aria-hidden="true"><path d="m12 5-5 5 5 5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </button>
+      </div>
+      <nav id="documents" aria-label="Documents"><p class="muted">Finding documents...</p></nav>
+    </aside>
+
+    <main id="reader" class="reader" tabindex="-1">
+      <div class="reader-inner">
+        <div id="doc-toolbar" class="doc-toolbar" hidden>
+          <span id="current-path" class="current-path"></span>
+          <div class="doc-actions">
+            <button id="annotation-toggle" class="annotation-toggle" type="button" role="switch" aria-checked="true">
+              <span>Annotate</span><span class="switch-track" aria-hidden="true"><span></span></span>
+            </button>
+          </div>
+        </div>
+        <p id="doc-notice" class="doc-notice" role="status" hidden></p>
+        <div id="reader-empty" class="reader-empty"><h1>Loading documents</h1></div>
+        <p id="line-keyboard" class="visually-hidden">Use Up and Down to choose a line, Left and Right to change scope, and Enter to comment.</p>
+        <p id="line-focus" class="visually-hidden" role="status"></p>
+        <article id="article" class="prose" aria-label="Source document" hidden></article>
+      </div>
+    </main>
+
+    <aside id="review" class="review" aria-labelledby="review-heading">
+      <div class="review-head">
+        <div class="review-title">
+          <h2 id="review-heading">Review</h2>
+          <button id="review-close" class="panel-close" type="button" aria-controls="review" aria-label="Collapse Review">
+            <svg viewBox="0 0 20 20" aria-hidden="true"><path d="m8 5 5 5-5 5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          </button>
+        </div>
+      </div>
+      <div id="review-scroll" class="review-scroll">
+        <div id="ended" class="ended" hidden>
+          <h3>Return to your agent</h3>
+          <p id="ended-note">This browser review has ended. Any feedback you sent stays in the local inbox.</p>
+          <button id="new-review" class="button small" type="button">Start a new review</button>
+        </div>
+        <div id="review-list"></div>
+      </div>
+      <form id="composer" class="composer" hidden>
+        <label id="composer-label" for="comment">New draft</label>
+        <p id="composer-context" class="composer-context"></p>
+        <textarea id="comment" rows="4" placeholder="What should the agent know?" required></textarea>
+        <div class="composer-actions">
+          <button id="cancel-comment" class="text-button" type="button">Cancel</button>
+          <button id="save-comment" class="button primary small" type="submit">Save draft</button>
+        </div>
+      </form>
+      <form id="general-composer" class="general-composer" hidden>
+        <label class="visually-hidden" for="general-comment">General feedback</label>
+        <textarea id="general-comment" rows="2" placeholder="Add a general comment..." aria-describedby="general-hint" required></textarea>
+        <p id="general-hint">Enter to queue · Shift+Enter for a new line</p>
+      </form>
+      <div class="review-footer">
+        <p id="error" class="error" role="alert" hidden></p>
+        <p id="status" class="activity" role="status" hidden></p>
+        <p id="connection" class="connection" hidden></p>
+        <div id="handoff" class="handoff">
+          <button id="send" class="button primary send" type="button" disabled>Send</button>
+          <button id="send-end" class="button send" type="button" disabled>Send and End</button>
+        </div>
+        <details id="agent-help" class="agent-help" hidden>
+          <summary>Agent not polling?</summary>
+          <div class="agent-help-content">
+            <p>Paste this prompt into your coding agent:</p>
+            <code id="agent-prompt"></code>
+            <button id="copy-prompt" class="button small" type="button">Copy prompt</button>
+          </div>
+        </details>
+      </div>
+    </aside>
+    <button id="documents-toggle" class="edge-toggle documents-edge" type="button" aria-controls="documents-panel" aria-expanded="true" aria-label="Open Documents">
+      <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 3.75h9.2L16 6.55v9.7H4zM13.2 3.75v2.8H16M7 9h6M7 12h6" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    </button>
+    <button id="review-toggle" class="edge-toggle review-edge" type="button" aria-controls="review" aria-expanded="true" aria-label="Open Review">
+      <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3.75 4.25h12.5v9H9L5.25 16v-2.75h-1.5zM7 8h6M7 10.75h4" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      <span id="shortcut-count">0</span>
+    </button>
+  </div>
+  <button id="sidebar-backdrop" class="sidebar-backdrop" type="button" aria-label="Close sidebar" hidden></button>
+
+  <svg id="line-outline" class="line-outline" aria-hidden="true" hidden></svg>
+  <button id="comment-selection" class="button small selection-action" type="button" disabled hidden>Comment on selection</button>
+  <form id="line-composer" class="line-composer" hidden>
+    <label id="line-label" for="line-comment"></label>
+    <textarea id="line-comment" rows="2" placeholder="What should the agent know?" aria-describedby="line-hint line-error" enterkeyhint="done" required></textarea>
+    <div class="line-footer">
+      <p id="line-hint" class="line-hint">Enter to queue · Shift+Enter for a new line</p>
+      <button id="cancel-line" class="text-button" type="button">Cancel</button>
+    </div>
+    <p id="line-error" class="error" role="alert" hidden></p>
+  </form>
+
+  <dialog id="confirmation" aria-labelledby="confirm-heading" aria-describedby="confirm-copy">
+    <form method="dialog">
+      <h2 id="confirm-heading"></h2>
+      <p id="confirm-copy"></p>
+      <div class="dialog-actions">
+        <button class="button" value="cancel" autofocus>Cancel</button>
+        <button id="confirm-action" class="button primary" value="confirm"></button>
+      </div>
+    </form>
+  </dialog>
+</body>
+</html>
