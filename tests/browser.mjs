@@ -605,7 +605,7 @@ async function verifyMirroredReply() {
   const root = await mkdtemp(join(tmpdir(), "truespec-reply-"));
   let viewer;
   try {
-    await fixture(root, "openspec");
+    const { first } = await fixture(root, "openspec");
     viewer = await start(root, "openspec");
     const run = (...args) => call(cli, args, { cwd: root, env: { ...process.env, PATH: "" } });
     const binding = JSON.parse(run(
@@ -665,6 +665,17 @@ async function verifyMirroredReply() {
       }), "A safe, unread agent reply is mirrored once and linked without resolving its comment");
       await page.click(".reply-reference");
       await page.wait("#line-outline[data-line='1']");
+    `);
+    await writeFile(join(root, first), "# Changed document\n\nThe old target is gone.\n");
+    script(`
+      await page.wait(".annotation-status .status.warning");
+      check(await page.eval(() => {
+        const states = [...document.querySelector(".annotation-status").children];
+        return states[0].classList.contains("delivery-indicator")
+          && states[1].textContent === "Outdated"
+          && states[1].title === "The document changed, so this comment may point to the wrong place."
+          && states.at(-1).textContent === "Unresolved";
+      }), "Agent progress appears first, Outdated second, and reviewer resolution last");
     `);
     assert.equal((await viewerApi(viewer, `/api/reviews/${viewer.review}`)).replies.length, 1);
     console.log("Verified one mirrored agent reply with unread and comment linkage.");

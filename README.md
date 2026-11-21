@@ -34,7 +34,7 @@ It reads OpenSpec artifacts in place and adds a review and agent-handoff layer a
 - **Precise annotations:** target a Markdown source line, paragraph, whole list, section, or exact rendered text selection.
 - **General feedback:** queue comments that have no document annotation.
 - **Cross-document review feed:** drafts and submitted feedback remain in one chronological list.
-- **Conservative re-anchoring:** reliable unique matches relocate after edits; ambiguous targets become **Needs review** instead of attaching to the wrong text.
+- **Conservative re-anchoring:** reliable unique matches relocate after edits; ambiguous targets become **Outdated** instead of attaching to the wrong text.
 - **Durable batching:** feedback is committed before the browser reports success and remains queued while no agent is connected.
 - **OpenCode integration:** `/truespec-review` pairs the current chat and worktree with one browser review.
 - **Agent reply mirror:** one completed harness response is appended to the browser feed for each batch.

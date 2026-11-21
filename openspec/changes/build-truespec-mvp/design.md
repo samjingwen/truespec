@@ -121,7 +121,7 @@ Ending the browser review allows any queued final batch to drain and does not st
 
 ## Risks / Trade-offs
 
-- **Edited or repeated text can defeat relocation.** Prefer **Needs review** over attaching to the wrong occurrence, and preserve the original evidence for a user-confirmed submission.
+- **Edited or repeated text can defeat relocation.** Prefer **Outdated** over attaching to the wrong occurrence, and preserve the original evidence for a user-confirmed submission.
 - **A crash can occur after the agent made an edit but before recording completion.** Deliver at least once and include stable IDs; agents should inspect current source before repeating an external action.
 - **A local HTTP listener still processes untrusted Markdown.** Restrict the file tree, disable active markup, and protect local mutations from unrelated browser origins.
 

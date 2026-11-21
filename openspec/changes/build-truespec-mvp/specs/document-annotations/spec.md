@@ -143,5 +143,5 @@ Otherwise it SHALL mark the anchor as needing review or missing and retain its o
 #### Scenario: Duplicate the identifying context
 
 - **WHEN** an edit leaves two locations with the same quote and indistinguishable identifying context
-- **THEN** the annotation shows **Needs review** instead of choosing a location
+- **THEN** the annotation shows **Outdated** instead of choosing a location
 - **AND** the reviewer can still read the original quote and comment

@@ -480,8 +480,13 @@ function caption(item) {
   return heading.at(-1) || "Entire document";
 }
 
-function statusBadge(label, type) {
-  return node("span", `status ${type || ""}`.trim(), label);
+function statusBadge(label, type, description) {
+  const badge = node("span", `status ${type || ""}`.trim(), label);
+  if (description) {
+    badge.title = description;
+    badge.setAttribute("aria-label", `${label}. ${description}`);
+  }
+  return badge;
 }
 
 function deliveryIndicator(item) {
@@ -628,11 +633,17 @@ function renderReview() {
       row.append(evidence);
     }
     const badges = node("div", "annotation-status");
-    if (item.location.status === "needs_review") badges.append(statusBadge("Needs review", "warning"));
+    if (item.delivery) badges.append(deliveryIndicator(item));
+    if (item.location.status === "needs_review") {
+      badges.append(statusBadge(
+        "Outdated",
+        "warning",
+        "The document changed, so this comment may point to the wrong place.",
+      ));
+    }
     if (item.location.status === "missing") badges.append(statusBadge("Source missing", "warning"));
     if (item.location.status === "relocated") badges.append(statusBadge("Relocated", "neutral"));
     if (item.delivery) {
-      badges.append(deliveryIndicator(item));
       badges.append(statusBadge(item.resolved ? "Resolved" : "Unresolved", item.resolved ? "" : "neutral"));
     }
     if (badges.childElementCount) row.append(badges);
