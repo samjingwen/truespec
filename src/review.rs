@@ -21,6 +21,7 @@ const GENERAL_DOCUMENT_PATH: &str = "@truespec/general-feedback";
 const SCHEMA: &str = include_str!("schema.sql");
 const CONNECTOR_MIGRATION: &str = include_str!("schema-v2.sql");
 const FEED_MIGRATION: &str = include_str!("schema-v3.sql");
+const MANUAL_REPLY_MIGRATION: &str = include_str!("schema-v4.sql");
 
 #[derive(Debug)]
 pub enum Problem {
@@ -245,20 +246,26 @@ impl Store {
         if version == 0 && create {
             con.pragma_update(None, "journal_mode", "WAL")?;
         }
-        if version != 3 {
+        if version != 4 {
             let tx = con.transaction_with_behavior(Immediate)?;
             match tx.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))? {
                 0 if create => {
                     tx.execute_batch(SCHEMA)?;
                     tx.execute_batch(CONNECTOR_MIGRATION)?;
                     tx.execute_batch(FEED_MIGRATION)?;
+                    tx.execute_batch(MANUAL_REPLY_MIGRATION)?;
                 }
                 1 => {
                     tx.execute_batch(CONNECTOR_MIGRATION)?;
                     tx.execute_batch(FEED_MIGRATION)?;
+                    tx.execute_batch(MANUAL_REPLY_MIGRATION)?;
                 }
-                2 => tx.execute_batch(FEED_MIGRATION)?,
-                3 => {}
+                2 => {
+                    tx.execute_batch(FEED_MIGRATION)?;
+                    tx.execute_batch(MANUAL_REPLY_MIGRATION)?;
+                }
+                3 => tx.execute_batch(MANUAL_REPLY_MIGRATION)?,
+                4 => {}
                 version => anyhow::bail!("Unsupported TrueSpec database version {version}"),
             }
             tx.commit()?;
@@ -505,6 +512,20 @@ impl Store {
         reply_id: &str,
         body: &str,
     ) -> Result<()> {
+        self.record_reply_inner(Some(connection), batch_id, reply_id, body)
+    }
+
+    pub fn record_manual_reply(&self, batch_id: &str, reply_id: &str, body: &str) -> Result<()> {
+        self.record_reply_inner(None, batch_id, reply_id, body)
+    }
+
+    fn record_reply_inner(
+        &self,
+        connection: Option<&str>,
+        batch_id: &str,
+        reply_id: &str,
+        body: &str,
+    ) -> Result<()> {
         validate_connector_text("Reply ID", reply_id, 1024)?;
         validate_body_limit("Agent reply", body, 1024 * 1024)?;
         self.write(|tx| {
@@ -522,16 +543,26 @@ impl Store {
                     Err(conflict("This batch already has a different agent reply."))
                 };
             }
-            let belongs: bool = tx.query_row(
-                "SELECT EXISTS (SELECT 1 FROM batches
-                 WHERE id = ?1 AND connector_id = ?2 AND connector_receipt IS NOT NULL)",
-                params![batch_id, connection],
-                |row| row.get(0),
-            )?;
+            let belongs: bool = if let Some(connection) = connection {
+                tx.query_row(
+                    "SELECT EXISTS (SELECT 1 FROM batches
+                     WHERE id = ?1 AND connector_id = ?2 AND connector_receipt IS NOT NULL)",
+                    params![batch_id, connection],
+                    |row| row.get(0),
+                )?
+            } else {
+                tx.query_row(
+                    "SELECT EXISTS (SELECT 1 FROM batches
+                     WHERE id = ?1 AND connector_id IS NULL AND first_received_at IS NOT NULL)",
+                    [batch_id],
+                    |row| row.get(0),
+                )?
+            };
             if !belongs {
-                return Err(conflict(
-                    "The delivered batch does not belong to this connector.",
-                ));
+                return Err(conflict(match connection {
+                    Some(_) => "The delivered batch does not belong to this connector.",
+                    None => "Acknowledge this manual batch before storing its reply.",
+                }));
             }
             let created = now();
             tx.execute(

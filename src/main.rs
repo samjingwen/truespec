@@ -48,13 +48,13 @@ enum Command {
         #[arg(long)]
         reset_state: bool,
     },
-    /// Wait for a batch in the local agent inbox.
-    Poll {
+    /// Listen for manual inbox work until activity or an inactivity timeout.
+    Listen {
         #[arg(long)]
         session: String,
-        /// Maximum wait in seconds (0 to 300).
-        #[arg(long, default_value_t = 30, value_parser = clap::value_parser!(u64).range(0..=300))]
-        wait: u64,
+        /// Exit after this period without a batch or review end.
+        #[arg(long, default_value = "30m", value_parser = parse_idle_timeout)]
+        idle_timeout: Duration,
         /// Emit compact JSON on stdout.
         #[arg(long)]
         json: bool,
@@ -71,6 +71,16 @@ enum Command {
         comment_id: String,
         #[arg(long)]
         lease: String,
+    },
+    /// Store one final Markdown reply for a manually delivered batch.
+    Reply {
+        batch_id: String,
+        /// Read Markdown from this file, or use - for stdin.
+        #[arg(long)]
+        body_file: PathBuf,
+        /// Stable retry key. Defaults to one deterministic ID per batch.
+        #[arg(long)]
+        reply_id: Option<String>,
     },
     /// Associate a moved Markdown file with its existing annotation history.
     Relink {
@@ -178,13 +188,13 @@ fn main() -> Result<()> {
                 .build()?
                 .block_on(web::serve(store, adapter, root, kind.name(), port, json))
         }
-        Command::Poll {
+        Command::Listen {
             session,
-            wait,
+            idle_timeout,
             json,
         } => {
             let inbox = LocalInbox(Store::open(&review::agent_root(root)?, false)?);
-            let envelope = inbox.poll(&session, Duration::from_secs(wait))?;
+            let envelope = inbox.listen(&session, idle_timeout)?;
             let output = if json {
                 serde_json::to_string(&envelope)?
             } else {
@@ -207,6 +217,18 @@ fn main() -> Result<()> {
             let inbox = LocalInbox(Store::open(&review::agent_root(root)?, false)?);
             inbox.complete(&batch_id, &comment_id, &lease)?;
             println!("Completed {comment_id}.");
+            Ok(())
+        }
+        Command::Reply {
+            batch_id,
+            body_file,
+            reply_id,
+        } => {
+            let body = read_reply_body(&body_file)?;
+            let reply_id = reply_id.unwrap_or_else(|| format!("manual:{batch_id}"));
+            let store = Store::open(&review::agent_root(root)?, false)?;
+            store.record_manual_reply(&batch_id, &reply_id, &body)?;
+            println!("Stored reply for {batch_id}.");
             Ok(())
         }
         Command::Relink { old_path, new_path } => {
@@ -312,4 +334,12 @@ fn read_reply_body(path: &Path) -> Result<String> {
     }
     ensure!(bytes.len() as u64 <= LIMIT, "Agent reply exceeds 1 MiB");
     Ok(String::from_utf8(bytes)?)
+}
+
+fn parse_idle_timeout(value: &str) -> Result<Duration, String> {
+    let duration = humantime::parse_duration(value).map_err(|error| error.to_string())?;
+    if duration.is_zero() || duration > Duration::from_secs(24 * 60 * 60) {
+        return Err("duration must be greater than zero and no more than 24h".into());
+    }
+    Ok(duration)
 }

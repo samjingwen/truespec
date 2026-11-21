@@ -186,10 +186,17 @@ fn command(root: &Path, args: &[&str], success: bool) -> String {
     String::from_utf8(output.stdout).unwrap()
 }
 
-fn poll(root: &Path, review: &str) -> Value {
+fn listen(root: &Path, review: &str) -> Value {
     serde_json::from_str(&command(
         root,
-        &["poll", "--session", review, "--json", "--wait", "0"],
+        &[
+            "listen",
+            "--session",
+            review,
+            "--json",
+            "--idle-timeout",
+            "1ms",
+        ],
         true,
     ))
     .unwrap()
@@ -243,7 +250,7 @@ fn openspec_nested_workspace_and_cross_document_handoff_survive_restart() {
     assert!(string(&page["html"]).contains("#scope"));
     let one_comment = first.add(one, 5, "Check the boundary.");
     let two_comment = first.add(two, 5, "Clarify the scope.");
-    assert_eq!(poll(root, &first.review)["event"], "idle");
+    assert_eq!(listen(root, &first.review)["event"], "idle_timeout");
     first.stop();
 
     let mut second = Viewer::start(root, &["--source", "markdown", "--docs", "openspec"]);
@@ -258,7 +265,7 @@ fn openspec_nested_workspace_and_cross_document_handoff_survive_restart() {
     ] });
     second.post(&second.api("/submit"), 409, wrong);
     assert_eq!(second.board()["review"]["ended"], false);
-    assert_eq!(poll(root, &second.review)["event"], "idle");
+    assert_eq!(listen(root, &second.review)["event"], "idle_timeout");
     let send = json!({ "key": Uuid::new_v4(), "end": true, "drafts": drafts });
     let sent = second.post(&second.api("/submit"), 200, send.clone());
     assert_eq!(sent["count"], 2);
@@ -281,7 +288,7 @@ fn openspec_nested_workspace_and_cross_document_handoff_survive_restart() {
     let moved = "openspec/changes/tweak/renamed.md";
     let relink = command(root, &["relink", proposal, moved], true);
     assert!(relink.contains(two));
-    let envelope = poll(root, &second.review);
+    let envelope = listen(root, &second.review);
     assert_eq!(envelope["event"], "batch");
     assert_eq!(envelope["session_ended"], true);
     let batch = string(&envelope["batch_id"]);
@@ -301,7 +308,7 @@ fn openspec_nested_workspace_and_cross_document_handoff_survive_restart() {
     for item in [&one_comment, &one_comment, &two_comment] {
         command(root, &["complete", batch, item, "--lease", lease], true);
     }
-    assert_eq!(poll(root, &second.review)["event"], "ended");
+    assert_eq!(listen(root, &second.review)["event"], "ended");
     let mut final_viewer = Viewer::start(root, &["--root", root.to_str().unwrap()]);
     let history = final_viewer.board();
     assert_eq!(history["comments"][0]["delivery"], "completed");
@@ -396,7 +403,7 @@ fn markdown_refresh_and_stale_confirmation_keep_the_original_context() {
     let id = viewer.add(id, 1, "Clarify the statement.");
     viewer.post(&viewer.api("/end"), 409, json!({ "keep_drafts": false }));
     viewer.post(&viewer.api("/end"), 204, json!({ "keep_drafts": true }));
-    assert_eq!(poll(root, &viewer.review)["event"], "ended");
+    assert_eq!(listen(root, &viewer.review)["event"], "ended");
     let next = viewer.post(&viewer.api("/new"), 200, json!({}));
     viewer.review = string(&next["id"]).to_owned();
     assert_eq!(
@@ -423,7 +430,7 @@ fn markdown_refresh_and_stale_confirmation_keep_the_original_context() {
     send["confirmation"] = before["confirmation"].clone();
     viewer.post(&viewer.api("/submit"), 200, send);
     viewer.stop();
-    let envelope = poll(root, &viewer.review);
+    let envelope = listen(root, &viewer.review);
     assert_eq!(envelope["items"][0]["original"]["heading"][0], "Spec");
     assert_eq!(envelope["items"][0]["original"]["original"]["line"], 1);
     assert_eq!(
@@ -442,12 +449,12 @@ fn a_waiting_agent_exits_when_a_browser_review_ends_without_feedback() {
         .current_dir(root)
         .env("PATH", "")
         .args([
-            "poll",
+            "listen",
             "--session",
             &viewer.review,
             "--json",
-            "--wait",
-            "30",
+            "--idle-timeout",
+            "30s",
         ])
         .stdout(Stdio::piped())
         .spawn()
@@ -458,6 +465,45 @@ fn a_waiting_agent_exits_when_a_browser_review_ends_without_feedback() {
     let event: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(event["event"], "ended");
     assert!(string(&event["next_step"]).contains("original agent chat"));
+    viewer.stop();
+}
+
+#[test]
+fn manual_listen_and_reply_mirrors_one_batch_response() {
+    let fixture = tempfile::tempdir().unwrap();
+    let root = fixture.path();
+    write(root, "guide.md", "# Guide\n\nOriginal text.\n");
+    let mut viewer = Viewer::start(root, &["--source", "markdown"]);
+    let docs = viewer.get("/api/documents");
+    let document = doc_id(&docs, "guide.md");
+    let comment = viewer.add(document, 3, "Explain this text.");
+    let submitted = viewer.post(
+        &viewer.api("/submit"),
+        200,
+        json!({
+            "key": Uuid::new_v4(), "end": false, "drafts": [{ "id": comment, "version": 1 }],
+        }),
+    );
+    let delivery = listen(root, &viewer.review);
+    let batch = string(&delivery["batch_id"]);
+    let lease = string(&delivery["lease"]);
+    write(root, "reply.md", "This is the explanation.\n");
+    command(root, &["reply", batch, "--body-file", "reply.md"], false);
+    command(root, &["ack", batch, "--lease", lease], true);
+    command(root, &["reply", batch, "--body-file", "reply.md"], true);
+    command(root, &["reply", batch, "--body-file", "reply.md"], true);
+    write(root, "different.md", "A different reply.\n");
+    command(
+        root,
+        &["reply", batch, "--body-file", "different.md"],
+        false,
+    );
+    let board = viewer.board();
+    assert_eq!(board["replies"][0]["batch_id"], submitted["batch_id"]);
+    assert_eq!(board["replies"][0]["body"], "This is the explanation.\n");
+    assert_eq!(board["replies"][0]["comment_ids"][0], comment);
+    assert_eq!(board["comments"][0]["delivery"], "replied");
+    assert_eq!(board["comments"][0]["resolved"], false);
     viewer.stop();
 }
 
@@ -601,7 +647,7 @@ fn previously_saved_section_drafts_can_still_be_submitted() {
     );
     viewer.stop();
     assert_eq!(
-        poll(root, &viewer.review)["items"][0]["original"]["original"]["kind"],
+        listen(root, &viewer.review)["items"][0]["original"]["original"]["kind"],
         "section"
     );
 }
@@ -709,8 +755,8 @@ fn a_versioned_connector_owns_its_batches_across_review_rounds() {
     assert!(!viewer.board().to_string().contains("test-chat"));
     assert_eq!(connector_poll("0")["event"], "idle");
     let first = add_and_submit("Clarify the first revision.", false);
-    assert_eq!(poll(root, &viewer.review)["batch_id"], manual["batch_id"]);
-    assert_eq!(poll(root, &viewer.review)["event"], "idle");
+    assert_eq!(listen(root, &viewer.review)["batch_id"], manual["batch_id"]);
+    assert_eq!(listen(root, &viewer.review)["event"], "idle_timeout");
     let first_attempt = connector_poll("0");
     assert_eq!(first_attempt["batch_id"], first["batch_id"]);
     assert_eq!(first_attempt["session_ended"], false);

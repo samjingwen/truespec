@@ -265,19 +265,20 @@ The Review panel includes a collapsed **Agent not polling?** prompt that can be 
 The agent-side loop is:
 
 ```sh
-# Wait for a batch.
-truespec poll --session "$REVIEW_ID" --json --wait 30
+# Wait up to 30 minutes for a batch or review end.
+truespec listen --session "$REVIEW_ID" --idle-timeout 30m --json
 
 # Record receipt and renew the lease.
 truespec ack "$BATCH_ID" --lease "$LEASE"
 
-# Handle one comment, then record completion.
-truespec complete "$BATCH_ID" "$COMMENT_ID" --lease "$LEASE"
+# After handling the batch, mirror the final Markdown response.
+truespec reply "$BATCH_ID" --body-file -
 ```
 
 Use `--root /path/to/project` when the agent is not running inside the reviewed workspace.
 Repeat `ack` before the five-minute lease expires if processing takes longer.
-Continue polling after a final batch until the event is `ended`.
+Start `listen` again after each batch and stop when the event is `ended` or `idle_timeout`.
+Use `complete` only when recording partial item progress before the final batch reply.
 
 Delivery is at least once.
 If an agent edits a file but loses its lease before recording completion, the item can be delivered again.
@@ -324,15 +325,16 @@ truespec setup [--connector <ID>]... [--all] [--list] [--force]
 With no options in an interactive terminal, setup presents a selection list.
 With no selection in a non-interactive environment, it prints the available connectors and the exact command to use.
 
-### `truespec poll`
+### `truespec listen`
 
-Waits for manual inbox work and prints a versioned delivery envelope.
+Listens for manual inbox work and prints one versioned delivery envelope.
 
 ```text
-truespec poll --session <REVIEW_ID> [--wait <SECONDS>] [--json]
+truespec listen --session <REVIEW_ID> [--idle-timeout <DURATION>] [--json]
 ```
 
-`--wait` accepts 0 through 300 seconds and defaults to 30.
+The inactivity timeout defaults to `30m`, accepts human-readable durations, and is capped at 24 hours.
+The command returns immediately when feedback arrives or the review ends.
 
 ### `truespec ack`
 
@@ -349,6 +351,17 @@ Marks one handled comment complete without resolving it for the reviewer.
 ```text
 truespec complete <BATCH_ID> <COMMENT_ID> --lease <TOKEN>
 ```
+
+### `truespec reply`
+
+Stores one final Markdown response for a manually delivered batch and marks its items handled.
+
+```text
+truespec reply <BATCH_ID> --body-file <PATH|->
+```
+
+Use `--body-file -` to read from stdin.
+Retries with the same batch and body are idempotent.
 
 ### `truespec relink`
 

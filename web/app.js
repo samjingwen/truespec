@@ -587,7 +587,13 @@ function renderReview() {
   elements["new-review"].textContent = board.latest === reviewId ? "Start a new review" : "Open current review";
   elements["agent-help"].hidden = !!connector;
   textState("connection", connector ? `Paired with ${connector}` : "");
-  elements["agent-prompt"].textContent = `Use TrueSpec to review feedback for review "${reviewId}" in this workspace. Retrieve and acknowledge queued feedback, update the referenced Markdown, mark handled comments complete, and keep polling until I end the review. Continue the discussion in this chat.`;
+  elements["agent-prompt"].textContent =
+    `Use TrueSpec to review feedback for review "${reviewId}" in this workspace. ` +
+    `Run \`truespec listen --session "${reviewId}" --idle-timeout 30m --json\`. ` +
+    "For each batch, acknowledge its lease, answer questions or make clearly requested Markdown changes, " +
+    "then pipe your final Markdown response to `truespec reply \"$BATCH_ID\" --body-file -`. " +
+    "Start listening again after each batch and stop when the review ends or the 30-minute inactivity timeout occurs. " +
+    "Continue the discussion in this chat.";
   elements.handoff.hidden = readonly;
   const list = elements["review-list"];
   const focusKey = document.activeElement?.dataset.focusKey;

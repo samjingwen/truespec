@@ -234,7 +234,8 @@ async function exercise(mode, width) {
         const prompt = document.querySelector("#agent-prompt").textContent;
         const help = document.querySelector("#agent-help");
         return help.matches("details") && !help.hidden && !help.open && prompt.includes(${JSON.stringify(viewer.review)})
-          && !prompt.includes("truespec poll") && document.querySelector("#copy-prompt").textContent === "Copy prompt";
+          && prompt.includes("truespec listen") && !prompt.includes("truespec poll")
+          && document.querySelector("#copy-prompt").textContent === "Copy prompt";
       }), "Standalone reviews show a collapsed, copyable agent prompt instead of a CLI command");
       await page.click("#agent-help > summary");
       check(await page.eval(() => document.querySelector("#agent-help").open), "The agent prompt disclosure expands");
@@ -544,8 +545,10 @@ async function exercise(mode, width) {
     await stop(viewer);
 
     const run = (...args) => call(cli, args, { cwd: root, env: { ...process.env, PATH: "" } });
-    const poll = () => JSON.parse(run("poll", "--session", previous, "--json", "--wait", "0"));
-    const batch = poll();
+    const listen = () => JSON.parse(run(
+      "listen", "--session", previous, "--json", "--idle-timeout", "1ms",
+    ));
+    const batch = listen();
     assert.equal(batch.session_ended, true);
     assert.equal(batch.event, "batch");
     assert.equal(batch.items[0].source.path, first);
@@ -576,14 +579,14 @@ async function exercise(mode, width) {
     run("ack", batch.batch_id, "--lease", batch.lease);
     for (const item of batch.items) run("complete", batch.batch_id, item.comment_id, "--lease", batch.lease);
     if (mode === "markdown") {
-      const followUp = poll();
+      const followUp = listen();
       assert.equal(followUp.event, "batch");
       assert.equal(followUp.items.length, 1);
       assert.equal(followUp.items[0].body, "A follow-up draft.");
       run("ack", followUp.batch_id, "--lease", followUp.lease);
       run("complete", followUp.batch_id, followUp.items[0].comment_id, "--lease", followUp.lease);
     }
-    assert.equal(poll().event, "ended");
+    assert.equal(listen().event, "ended");
 
     viewer = await start(root, mode);
     script(`

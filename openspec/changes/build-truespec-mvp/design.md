@@ -86,9 +86,10 @@ Only this adapter needs to know the CLI delivery protocol.
 
 | Agent command | Purpose |
 | --- | --- |
-| `truespec poll --session SESSION_ID --json --wait 30` | Lease available items; return the work and session status, or an idle or ended result. |
+| `truespec listen --session SESSION_ID --json --idle-timeout 30m` | Wait for available work or review end and close after 30 minutes without activity. |
 | `truespec ack BATCH_ID --lease TOKEN` | Record receipt and renew the current lease; repeat if processing takes longer. |
 | `truespec complete BATCH_ID COMMENT_ID --lease TOKEN` | Record item completion without posting a browser message. |
+| `truespec reply BATCH_ID --body-file -` | Store one final manual batch response and append it to the browser feed. |
 
 Show the review ID in the viewer as well as in the startup output so a new review does not require a server restart.
 An agent can supply the same workspace with `--root` when invoked elsewhere.
