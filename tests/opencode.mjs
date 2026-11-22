@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFile, spawn } from "node:child_process";
 import { once } from "node:events";
-import { access, cp, mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -82,8 +82,8 @@ try {
   await once(provider, "listening");
   const providerUrl = `http://127.0.0.1:${provider.address().port}/v1`;
   await mkdir(dirname(join(workspace, reviewedPath)), { recursive: true });
+  await mkdir(join(workspace, ".git"));
   await mkdir(join(workspace, ".opencode/plugins"), { recursive: true });
-  await cp(".opencode/plugins/truespec", join(workspace, ".opencode/plugins/truespec"), { recursive: true });
   await writeFile(join(workspace, reviewedPath), "# Reader\n\nOriginal revision.\n");
   await writeFile(join(workspace, "opencode.json"), JSON.stringify({
     model: "fixture/mock",
@@ -127,6 +127,12 @@ try {
     OPENCODE_DB: join(root, "opencode.sqlite"), OPENCODE_DISABLE_FREE_MODELS: "1",
     TRUESPEC_BIN: binary, TRUESPEC_NO_OPEN: "1",
   };
+  const initialized = await new Promise(resolve => {
+    execFile(binary, ["init", "--integration", "opencode"], {
+      env, cwd: workspace, encoding: "utf8", timeout: 25_000,
+    }, (error, stdout, stderr) => resolve({ ok: !error, text: stdout.trim() || stderr.trim() }));
+  });
+  assert.ok(initialized.ok, initialized.text);
   server = spawn(opencode, ["serve", "--service", "--hostname", "127.0.0.1", "--port", "0"],
     { env, cwd: workspace, stdio: ["ignore", "pipe", "pipe"] });
   server.stdout.on("data", chunk => { log = (log + chunk).slice(-16_000); });
@@ -153,11 +159,12 @@ try {
   const invoke = path => cliRequest("POST", `${path}/command`, command);
   const opened = await invoke(chat);
   assert.ok(opened.ok, `${opened.text}\n${log}`);
-  const getNotes = async () => {
-    const inbox = await openCode(`${chat}/inbox`);
-    const messages = await openCode(`${chat}/message?type=synthetic`);
+  const notesFor = async path => {
+    const inbox = await openCode(`${path}/inbox`);
+    const messages = await openCode(`${path}/message?type=synthetic`);
     return [...new Set(JSON.stringify([inbox, messages]).match(/http:\/\/127\.0\.0\.1:\d+\/\?review=[a-z0-9-]+/g) || [])];
   };
+  const getNotes = () => notesFor(chat);
   const viewer = await until("TrueSpec viewer URL published to the paired chat", async () => (await getNotes())[0]);
   const review = new URL(viewer).searchParams.get("review");
   assert.ok(review);
@@ -194,15 +201,53 @@ try {
     assert.equal((await board()).review.ended, end);
     const messages = await openCode(`${chat}/message?type=user`);
     const id = `msg_truespec_${batch.batch_id.replaceAll("-", "")}`;
-    assert.equal(JSON.stringify(messages).split(id).length - 1, 1, "The batch belongs to one chat message");
+    const delivered = JSON.stringify(messages);
+    assert.equal(delivered.split(id).length - 1, 1, "The batch belongs to one chat message");
+    assert.match(delivered, /@truespec-review/);
+    assert.doesNotMatch(delivered, /Treat each comment|Do not edit Markdown|Read the current files/);
   };
   await round("Use revision one.", "Revision one.", false);
   await round("Use revision two.", "Revision two.", true);
   assert.equal((await board()).comments.filter(comment => comment.delivery === "replied").length, 2);
   assert.equal((await board()).replies.length, 2);
+
+  const markdownWorkspace = join(root, "markdown-workspace");
+  await mkdir(join(markdownWorkspace, ".git"), { recursive: true });
+  await writeFile(join(markdownWorkspace, "guide.md"), "# Markdown guide\n");
+  await writeFile(join(markdownWorkspace, "opencode.json"), JSON.stringify({
+    model: "fixture/mock",
+    providers: {
+      fixture: {
+        package: "@opencode/ai/providers/openai-compatible",
+        settings: { baseURL: providerUrl, apiKey: "test-only", timeout: 8_000 },
+        compatibility: { streamUsage: false },
+        models: { mock: { capabilities: { tools: true } } },
+      },
+    },
+  }));
+  const markdownInit = await new Promise(resolve => {
+    execFile(binary, [
+      "init", "--source", "markdown", "--source-path", ".", "--integration", "opencode",
+    ], { env, cwd: markdownWorkspace, encoding: "utf8", timeout: 25_000 },
+    (error, stdout, stderr) => resolve({ ok: !error, text: stdout.trim() || stderr.trim() }));
+  });
+  assert.ok(markdownInit.ok, markdownInit.text);
+  const { data: markdownSession } = await openCode("/api/session", {
+    title: "Markdown review", location: { directory: markdownWorkspace },
+  });
+  const markdownChat = `/api/session/${markdownSession.id}`;
+  const markdownOpened = await invoke(markdownChat);
+  assert.ok(markdownOpened.ok, `${markdownOpened.text}\n${log}`);
+  const markdownViewer = await until(
+    "Markdown TrueSpec viewer URL",
+    async () => (await notesFor(markdownChat))[0],
+  );
+  const markdownDocuments = await api(markdownViewer, "/api/documents");
+  assert.equal(markdownDocuments.find(document => document.path === "guide.md")?.kind, "markdown");
+
   const otherMessages = await openCode(`/api/session/${other.id}/message?type=user`);
-  assert.doesNotMatch(JSON.stringify(otherMessages), /TrueSpec review feedback/);
-  console.log("Verified two TrueSpec rounds in one isolated OpenCode chat with local Markdown edits.");
+  assert.doesNotMatch(JSON.stringify(otherMessages), /@truespec-review/);
+  console.log("Verified paired OpenCode review rounds and both initialized source adapters.");
 } finally {
   if (server && server.exitCode === null && server.signalCode === null) {
     const exit = once(server, "exit");

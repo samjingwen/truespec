@@ -585,15 +585,7 @@ function renderReview() {
     : "This browser review has ended. Any feedback you sent stays in the local inbox.";
   elements["new-review"].hidden = !!connector;
   elements["new-review"].textContent = board.latest === reviewId ? "Start a new review" : "Open current review";
-  elements["agent-help"].hidden = !!connector;
   textState("connection", connector ? `Paired with ${connector}` : "");
-  elements["agent-prompt"].textContent =
-    `Use TrueSpec to review feedback for review "${reviewId}" in this workspace. ` +
-    `Run \`truespec listen --session "${reviewId}" --idle-timeout 30m --json\`. ` +
-    "For each batch, acknowledge its lease, answer questions or make clearly requested Markdown changes, " +
-    "then pipe your final Markdown response to `truespec reply \"$BATCH_ID\" --body-file -`. " +
-    "Start listening again after each batch and stop when the review ends or the 30-minute inactivity timeout occurs. " +
-    "Continue the discussion in this chat.";
   elements.handoff.hidden = readonly;
   const list = elements["review-list"];
   const focusKey = document.activeElement?.dataset.focusKey;
@@ -1204,14 +1196,6 @@ composer.addEventListener("submit", event => {
 elements["send-end"].addEventListener("click", () => void sendDrafts(true));
 elements.send.addEventListener("click", () => void sendDrafts(false));
 elements["new-review"].addEventListener("click", () => void startReview());
-elements["copy-prompt"].addEventListener("click", async () => {
-  try {
-    await navigator.clipboard.writeText(elements["agent-prompt"].textContent);
-    textState("status", "Agent prompt copied.");
-  } catch {
-    textState("error", "Clipboard unavailable. Select and copy the command directly.");
-  }
-});
 window.addEventListener("popstate", () => {
   const params = new URL(window.location.href).searchParams;
   const targetReview = params.get("review");

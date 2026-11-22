@@ -83,8 +83,17 @@ async function viewerApi(viewer, path, body, expected = 200) {
 }
 
 async function start(root, mode) {
-  const args = mode === "openspec" ? ["serve"] : ["serve", "--source", "markdown", "--docs", "docs"];
-  const child = spawn(cli, args, { cwd: root, env: { ...process.env, PATH: "" }, stdio: ["ignore", "pipe", "inherit"] });
+  await mkdir(join(root, "truespec/config"), { recursive: true });
+  await writeFile(join(root, "truespec/config/project.json"), JSON.stringify({
+    version: 1,
+    source: {
+      adapter: mode,
+      path: mode === "openspec" ? "openspec" : "docs",
+    },
+  }, null, 2) + "\n");
+  const child = spawn(cli, ["connector", "--protocol", "1", "serve"], {
+    cwd: root, env: { ...process.env, PATH: "" }, stdio: ["ignore", "pipe", "inherit"],
+  });
   const stream = createInterface({ input: child.stdout });
   try {
     const lines = stream[Symbol.asyncIterator]();
@@ -159,6 +168,11 @@ async function exercise(mode, width) {
   try {
     const { first, second, source } = await fixture(root, mode);
     viewer = await start(root, mode);
+    const run = (...args) => call(cli, args, { cwd: root, env: { ...process.env, PATH: "" } });
+    const binding = JSON.parse(run(
+      "connector", "attach", "--kind", "browser-test",
+      "--destination", `browser-${mode}`, "--label", "Browser Test",
+    ));
     chrome(["open", viewer.url]);
     if (width < 500) chrome(["emulate", "--viewport", `${width}x880x1`]);
     else chrome(["resize", String(width), "880"]);
@@ -230,17 +244,9 @@ async function exercise(mode, width) {
         "Panel controls stay attached to their sidebars instead of the app header");
       check(await page.eval(() => !document.querySelector("#workspace") && !document.querySelector("#source")),
         "The header should contain no workspace or source labels");
-      check(await page.eval(() => {
-        const prompt = document.querySelector("#agent-prompt").textContent;
-        const help = document.querySelector("#agent-help");
-        return help.matches("details") && !help.hidden && !help.open
-          && help.querySelector("summary").textContent === "Agent not listening?"
-          && prompt.includes(${JSON.stringify(viewer.review)})
-          && prompt.includes("truespec listen") && !prompt.includes("truespec poll")
-          && document.querySelector("#copy-prompt").textContent === "Copy prompt";
-      }), "Standalone reviews show a collapsed, copyable agent prompt instead of a CLI command");
-      await page.click("#agent-help > summary");
-      check(await page.eval(() => document.querySelector("#agent-help").open), "The agent prompt disclosure expands");
+      check(await page.eval(() => !document.querySelector("#agent-help")
+        && document.querySelector("#connection").textContent === "Paired with Browser Test"),
+        "Initialized reviews show their paired integration without a standalone handoff");
       ${mode === "openspec" ? `
         check(await page.eval(() => {
           const group = [...document.querySelectorAll(".doc-group")].find(item => item.querySelector("h2")?.textContent === "change / revise-login");
@@ -306,7 +312,6 @@ async function exercise(mode, width) {
     await writeFile(join(root, first), `A new preamble from an external edit.\n\n${source}`);
     script(`
       await page.wait("#doc-notice:not([hidden])");
-      check(await page.eval(() => document.querySelector("#agent-help").open), "The expanded agent prompt survives refresh");
       check(await page.eval(() => document.querySelector("#line-comment").value === "Define the exact timeout.\\nInclude units."), "Refresh must preserve the open composer");
       await page.press("Enter");
       await page.wait("#line-error:not([hidden])");
@@ -541,16 +546,15 @@ async function exercise(mode, width) {
         "All sent items remain in the unified feed");
       check(await page.eval(() => [...document.querySelectorAll("#review-list > .annotation")].every(item => {
         const indicator = item.querySelector(".delivery-indicator.working");
-        return indicator?.getAttribute("aria-label") === "Waiting for agent";
-      })), "Display a labeled working spinner while no agent is connected");
+        return indicator?.getAttribute("aria-label") === "Queued for Browser Test";
+      })), "Display a labeled working spinner while paired delivery is pending");
     `);
     await stop(viewer);
 
-    const run = (...args) => call(cli, args, { cwd: root, env: { ...process.env, PATH: "" } });
-    const listen = () => JSON.parse(run(
-      "listen", "--session", previous, "--json", "--idle-timeout", "1ms",
+    const poll = () => JSON.parse(run(
+      "connector", "poll", "--connection", binding.connection_id, "--wait", "0",
     ));
-    const batch = listen();
+    const batch = poll();
     assert.equal(batch.session_ended, true);
     assert.equal(batch.event, "batch");
     assert.equal(batch.items[0].source.path, first);
@@ -578,17 +582,27 @@ async function exercise(mode, width) {
     assert.equal(batch.items[5].original.original.kind, "general");
     assert.equal(batch.items[5].source.path, null);
     assert.equal(batch.items[5].body, "A general note.\nNo annotation needed.");
-    run("ack", batch.batch_id, "--lease", batch.lease);
-    for (const item of batch.items) run("complete", batch.batch_id, item.comment_id, "--lease", batch.lease);
+    const finish = async (incoming, replyID) => {
+      run(
+        "connector", "delivered", incoming.batch_id, "--connection", binding.connection_id,
+        "--lease", incoming.lease, "--receipt", `receipt-${replyID}`,
+      );
+      const reply = join(root, `reply-${replyID}.md`);
+      await writeFile(reply, `Handled ${incoming.items.length} review comments.\\n`);
+      run(
+        "connector", "respond", incoming.batch_id, "--connection", binding.connection_id,
+        "--reply-id", replyID, "--body-file", reply,
+      );
+    };
+    await finish(batch, "first");
     if (mode === "markdown") {
-      const followUp = listen();
+      const followUp = poll();
       assert.equal(followUp.event, "batch");
       assert.equal(followUp.items.length, 1);
       assert.equal(followUp.items[0].body, "A follow-up draft.");
-      run("ack", followUp.batch_id, "--lease", followUp.lease);
-      run("complete", followUp.batch_id, followUp.items[0].comment_id, "--lease", followUp.lease);
+      await finish(followUp, "follow-up");
     }
-    assert.equal(listen().event, "ended");
+    assert.equal(poll().event, "ended");
 
     viewer = await start(root, mode);
     script(`
@@ -614,7 +628,7 @@ async function verifyMirroredReply() {
     viewer = await start(root, "openspec");
     const run = (...args) => call(cli, args, { cwd: root, env: { ...process.env, PATH: "" } });
     const binding = JSON.parse(run(
-      "connector", "attach", "--source", "openspec", "--kind", "browser-test",
+      "connector", "attach", "--kind", "browser-test",
       "--destination", "browser-chat", "--label", "Browser Test",
     ));
     const [document] = await viewerApi(viewer, "/api/documents");

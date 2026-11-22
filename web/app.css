@@ -197,11 +197,6 @@ button:disabled { cursor: default; opacity: 0.58; }
 .send { width: 100%; padding-block: 0.61rem; }
 .handoff { display: grid; grid-template-columns: 1fr 1fr; gap: 0.45rem; }
 .connection { color: var(--quiet); font-size: 0.78rem; margin: 0 0 0.55rem; overflow-wrap: anywhere; }
-.agent-help { font-size: 0.76rem; color: var(--quiet); margin-top: 0.4rem; }
-.agent-help summary { width: fit-content; cursor: pointer; color: var(--quiet); font-weight: 650; }
-.agent-help-content { padding-top: 0.45rem; }
-.agent-help p { margin: 0 0 0.35rem; }
-.agent-help code { display: block; font: 0.75rem/1.5 var(--mono); overflow-wrap: anywhere; background: var(--inset); padding: 0.45rem; margin: 0.35rem 0; border-radius: 0.25rem; user-select: all; }
 .composer { background: var(--paper); border-top: 1px solid var(--line); padding: 0.75rem 1rem; }
 .composer label { display: block; font-weight: 670; font-size: 0.88rem; }
 .composer-context { margin: 0.25rem 0 0.45rem; font-size: 0.78rem; color: var(--quiet); overflow-wrap: anywhere; }

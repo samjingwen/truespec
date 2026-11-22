@@ -12,11 +12,6 @@ use crate::review::{BatchItem, Problem, Store, conflict, new_id, now, validate_c
 const LEASE_MS: i64 = 5 * 60 * 1000;
 pub const PROTOCOL_VERSION: u8 = 1;
 
-pub trait AgentInbox {
-    fn acknowledge(&self, batch_id: &str, token: &str) -> Result<i64>;
-    fn complete(&self, batch_id: &str, comment_id: &str, token: &str) -> Result<()>;
-}
-
 pub struct LocalInbox(pub Store);
 
 #[derive(Debug, Serialize)]
@@ -40,7 +35,6 @@ pub enum Outcome {
         items: Vec<BatchItem>,
     },
     Idle,
-    IdleTimeout,
     Ended,
 }
 
@@ -59,9 +53,6 @@ impl Envelope {
             (Outcome::Idle, _) => {
                 "No work available before the wait expired. Poll again if you are waiting for this review."
             }
-            (Outcome::IdleTimeout, _) => {
-                "No review activity before the inactivity timeout. Stop listening unless the user asks to resume."
-            }
         };
         Self {
             protocol_version: PROTOCOL_VERSION,
@@ -73,26 +64,7 @@ impl Envelope {
     }
 }
 
-impl AgentInbox for LocalInbox {
-    fn acknowledge(&self, batch_id: &str, token: &str) -> Result<i64> {
-        self.ack_at(batch_id, token, now)
-    }
-
-    fn complete(&self, batch_id: &str, comment_id: &str, token: &str) -> Result<()> {
-        self.complete_at(batch_id, comment_id, token, now)
-    }
-}
-
 impl LocalInbox {
-    pub fn listen(&self, session_id: &str, wait: Duration) -> Result<Envelope> {
-        let mut envelope = self.wait_for(session_id, None, wait)?;
-        if matches!(envelope.outcome, Outcome::Idle) {
-            envelope.outcome = Outcome::IdleTimeout;
-            envelope.next_step = "No review activity before the inactivity timeout. Stop listening unless the user asks to resume.";
-        }
-        Ok(envelope)
-    }
-
     pub fn poll_connector(&self, connection: &str, wait: Duration) -> Result<Envelope> {
         let session = self.0.connector_review(connection)?;
         self.wait_for(&session, Some(connection), wait)
@@ -219,6 +191,7 @@ impl LocalInbox {
         })
     }
 
+    #[cfg(test)]
     fn ack_at(&self, batch_id: &str, token: &str, clock: impl FnOnce() -> i64) -> Result<i64> {
         self.0.write(|tx| {
             let time = clock();
@@ -236,6 +209,7 @@ impl LocalInbox {
         })
     }
 
+    #[cfg(test)]
     fn complete_at(
         &self,
         batch_id: &str,

@@ -59,18 +59,17 @@ Annotations, drafts, batches, reviews
           v
 Local SQLite inbox
           |
-          +-----------------------+
-          |                       |
-          v                       v
-OpenCode connector         Manual agent loop
-          |                       |
-          +-----------+-----------+
-                      |
-                      v
-          Coding agent edits Markdown
-                      |
-                      v
-             Browser refreshes files
+          v
+ Selected integration adapter
+          |
+          v
+   truespec-review skill
+          |
+          v
+ Coding agent edits Markdown
+          |
+          v
+ Browser refreshes files
 ```
 
 Document-source adapters and coding-harness connectors are independent.
@@ -82,6 +81,7 @@ The shared review core does not require OpenSpec or OpenCode.
 
 - A current stable Rust toolchain.
 - A C compiler for the bundled SQLite build.
+- A Git repository root for project initialization; TrueSpec does not invoke the Git executable.
 - macOS or Linux for the currently verified delivery paths.
 
 Clone and install:
@@ -100,37 +100,42 @@ truespec --version
 
 The installed binary does not require Node.js, OpenSpec, Lavish, or a separate frontend build.
 
-## Quick start with OpenSpec
+## Initialize a repository
 
-Run this from an OpenSpec workspace or any child directory:
+Run initialization once from the Git repository root:
 
 ```sh
-truespec serve
+truespec init
 ```
 
-TrueSpec discovers the nearest `openspec/` directory, binds only to `127.0.0.1`, and prints the browser URL and review ID.
+TrueSpec detects `openspec/` when present and otherwise selects Markdown from the repository root.
+The interactive flow presents a multi-select for one or more coding integrations.
+Use source flags when you want to override automatic detection.
+OpenCode is currently the only built-in integration.
 
-Use an explicit workspace or port when needed:
+For scripts and automated environments, select integrations explicitly:
 
 ```sh
-truespec serve --root /path/to/project
-truespec serve --root /path/to/project --port 4317
+truespec init --integration opencode
+truespec init --all
 ```
 
-OpenSpec is not a runtime dependency.
-TrueSpec discovers and reads the files directly.
-
-## Quick start with a Markdown folder
+Choose a plain Markdown source explicitly:
 
 ```sh
-truespec serve \
+truespec init \
   --source markdown \
-  --root /path/to/project \
-  --docs docs
+  --source-path documentation \
+  --integration opencode
 ```
 
-`--docs` is relative to the workspace selected by `--root`.
-When omitted for the Markdown source, it defaults to the workspace itself.
+`--source-path` is relative to the repository root.
+It defaults to `openspec` for OpenSpec and `.` for Markdown.
+Repeat `--integration` to install several integrations when more become available.
+
+Initialization writes `truespec/config/project.json`, preserves `truespec/.state/`, and installs each selected integration for the current user.
+OpenSpec is not a runtime dependency.
+TrueSpec discovers and reads its files directly.
 
 ## Review workflow
 
@@ -186,49 +191,39 @@ Reliable targets relocate; ambiguous or missing targets retain their original co
 
 ## OpenCode workflow
 
-### Install the connector
+### Initialize OpenCode
 
-Run the interactive setup:
-
-```sh
-truespec setup
-```
-
-TrueSpec lists supported coding harness connectors and their installation state.
-OpenCode is currently the only built-in connector.
-
-For scripts or non-interactive environments:
+From the repository root:
 
 ```sh
-truespec setup --connector opencode
-truespec setup --all
-truespec setup --list
+truespec init --integration opencode
 ```
 
-`--connector` is repeatable for future harnesses.
-Setup is idempotent and refuses to overwrite a different connector file unless `--force` is explicit.
-The generated OpenCode plugin records the installed TrueSpec binary path, so the OpenCode service does not need to inherit Cargo's PATH.
+Initialization installs the OpenCode plugin and portable `truespec-review` skill in OpenCode's global discovery directories.
+The generated plugin records the installed TrueSpec binary path, so the OpenCode service does not need to inherit Cargo's PATH.
+Matching generated files are preserved.
+A differing plugin or skill is protected unless `--force` is explicit.
 
-OpenCode watches its global plugin directory.
-Run `/reload` if the command is not immediately visible.
+OpenCode watches its global plugin and skill directories.
+Run `/reload` if the command or skill is not immediately visible.
 
-### Start a paired review
+### Start a review
 
-In an OpenCode V2 chat located in an OpenSpec workspace:
+In an OpenCode V2 chat located at the initialized repository root:
 
 ```text
 /truespec-review
 ```
 
-The command takes no file argument.
-It opens or resumes one TrueSpec review paired with that exact OpenCode chat and worktree.
+The command takes no arguments.
+It reads `truespec/config/project.json` and opens or resumes one review paired with that exact OpenCode chat and worktree.
 
 The iterative loop is:
 
 1. Add comments in TrueSpec.
 2. Click **Send**.
-3. The batch appears as one queued message in the same OpenCode chat.
-4. The agent answers questions or applies clearly requested Markdown changes in place.
+3. The batch appears as one concise `@truespec-review` message in the same OpenCode chat.
+4. The skill guides the agent to answer questions or apply clearly requested Markdown changes in place.
 5. The completed OpenCode response is mirrored into the chronological Review feed.
 6. TrueSpec refreshes changed Markdown in the same browser tab.
 7. Repeat until the review is complete.
@@ -240,151 +235,60 @@ Ending TrueSpec does not close the OpenCode chat.
 OpenCode remains the canonical conversation; the browser reply is a read-only mirror linked to that batch.
 An agent reply shows the green done indicator, but never resolves comments automatically.
 
-### Develop with the repository-local plugin
+### Update an installed integration
 
-This repository automatically exposes [`.opencode/plugins/truespec`](.opencode/plugins/truespec/) when opened in OpenCode.
-Another project can reference that development plugin explicitly:
-
-```jsonc
-{
-  "plugins": [
-    {
-      "package": "/path/to/truespec/.opencode/plugins/truespec"
-    }
-  ]
-}
-```
-
-For a manually configured OpenCode server with a different PATH, set the plugin's `options.binary` to the absolute TrueSpec binary path.
-
-## Standalone agent workflow
-
-A standalone review does not start an arbitrary coding agent.
-The Review panel includes a collapsed **Agent not listening?** prompt that can be copied into an existing agent chat.
-
-The agent-side loop is:
+Re-run initialization after upgrading the binary:
 
 ```sh
-# Wait up to 30 minutes for a batch or review end.
-truespec listen --session "$REVIEW_ID" --idle-timeout 30m --json
-
-# Record receipt and renew the lease.
-truespec ack "$BATCH_ID" --lease "$LEASE"
-
-# After handling the batch, mirror the final Markdown response.
-truespec reply "$BATCH_ID" --body-file -
+truespec init --integration opencode --force
 ```
 
-Use `--root /path/to/project` when the agent is not running inside the reviewed workspace.
-Repeat `ack` before the five-minute lease expires if processing takes longer.
-Start `listen` again after each batch and stop when the event is `ended` or `idle_timeout`.
-Use `complete` only when recording partial item progress before the final batch reply.
-
-Delivery is at least once.
-If an agent edits a file but loses its lease before recording completion, the item can be delivered again.
-Agents should use stable IDs and inspect current source before repeating an external action.
+Use `--force` only after confirming that you intend to replace a differing generated plugin or skill.
+TrueSpec preflights the complete initialization plan before writing project or integration files.
 
 ## Command reference
 
-### `truespec serve`
+### `truespec init`
 
-Starts the local document viewer and review service.
+Initializes the current repository and installs coding integrations.
 
 ```text
-truespec serve [OPTIONS]
+truespec init [--source <ID>] [--source-path <PATH>]
+              [--integration <ID>]... [--all] [--force]
 ```
 
 | Option | Meaning |
 | --- | --- |
-| `--root <PATH>` | Select the workspace explicitly instead of discovering it. |
-| `--source <openspec\|markdown>` | Choose the document-source adapter. Defaults to `openspec`. |
-| `--docs <PATH>` | Select the document directory inside the workspace. |
-| `--port <PORT>` | Select a fixed loopback port. `0` asks the OS to choose. |
-| `--json` | Emit a versioned JSON startup record for connectors. |
-| `--reset-state` | Remove only this workspace's `truespec/.state/` before starting. |
+| `--source <ID>` | Select a registered source adapter. Current values are `openspec` and `markdown`. |
+| `--source-path <PATH>` | Select the adapter root relative to the repository. |
+| `--integration <ID>` | Install one coding integration. Repeat to select several. |
+| `--all` | Install every registered integration. |
+| `--force` | Replace differing generated files for selected integrations. |
 
-Stop other TrueSpec processes for the workspace before using `--reset-state`.
-TrueSpec prints the exact state directory it removes and refuses symlinked state paths.
-Markdown and `truespec/config/` remain untouched.
+With no integration flags in an interactive terminal, initialization presents a multi-select.
+Non-interactive initialization requires `--integration` or `--all`.
+Run `truespec --help` for the authoritative public command surface.
 
-### `truespec setup`
+Connector transport and viewer operations are hidden implementation details.
+Their accepted behavior is defined by the [connector protocol specification](openspec/specs/connector-protocol/spec.md).
 
-Lists and installs optional coding-harness connectors.
+### Upgrade from the pre-initialization MVP
 
-```text
-truespec setup [--connector <ID>]... [--all] [--list] [--force]
-```
-
-| Option | Meaning |
-| --- | --- |
-| `--connector <ID>` | Install one connector. Repeat for several. |
-| `--all` | Install every supported connector. |
-| `--list` | Show connectors and installation state without changing files. |
-| `--force` | Replace a differing generated connector file. |
-
-With no options in an interactive terminal, setup presents a selection list.
-With no selection in a non-interactive environment, it prints the available connectors and the exact command to use.
-
-### `truespec listen`
-
-Listens for manual inbox work and prints one versioned delivery envelope.
-
-```text
-truespec listen --session <REVIEW_ID> [--idle-timeout <DURATION>] [--json]
-```
-
-The inactivity timeout defaults to `30m`, accepts human-readable durations, and is capped at 24 hours.
-The command returns immediately when feedback arrives or the review ends.
-
-### `truespec ack`
-
-Records agent receipt and renews the delivery lease.
-
-```text
-truespec ack <BATCH_ID> --lease <TOKEN>
-```
-
-### `truespec complete`
-
-Marks one handled comment complete without resolving it for the reviewer.
-
-```text
-truespec complete <BATCH_ID> <COMMENT_ID> --lease <TOKEN>
-```
-
-### `truespec reply`
-
-Stores one final Markdown response for a manually delivered batch and marks its items handled.
-
-```text
-truespec reply <BATCH_ID> --body-file <PATH|->
-```
-
-Use `--body-file -` to read from stdin.
-Retries with the same batch and body are idempotent.
-
-### `truespec relink`
-
-Associates a missing reviewed path with a moved Markdown file.
-
-```text
-truespec relink <OLD_PATH> <NEW_PATH>
-```
-
-The old path must be missing.
-The destination must be an unclaimed Markdown file inside the workspace.
-Submitted snapshots keep their historical source paths.
-
-### `truespec connector`
-
-Provides the versioned local protocol used by coding-harness integrations.
-It is normally called by connector implementations rather than by reviewers.
-See the [connector protocol specification](openspec/specs/connector-protocol/spec.md) for attach, poll, delivered, defer, leasing, retry, reply, and receipt semantics.
-
-Every subcommand also supports the global `--root <PATH>` option where a workspace is required.
-Use `truespec <COMMAND> --help` for the authoritative flags in the installed version.
+Run `truespec init` once from each repository root after upgrading.
+The existing SQLite database and review history remain in place.
+The first selected integration adopts outstanding connector-free batches without changing their snapshots or completed items.
+The former public viewer, setup, manual inbox, reply, and relink commands are no longer available.
 
 ## Storage and state
+
+Shared source configuration lives at:
+
+```text
+truespec/config/project.json
+```
+
+Commit this file so contributors review the same document source.
+Integration selection remains user-local.
 
 Review state lives at:
 
@@ -417,20 +321,23 @@ TrueSpec is one Rust binary with ordinary internal boundaries:
 
 | Area | Responsibility |
 | --- | --- |
-| `source` | Document-source interface, workspace discovery, OpenSpec grouping, and Markdown-folder traversal. |
+| `source` | Source-adapter registry, document-source interface, OpenSpec grouping, and Markdown-folder traversal. |
+| `project` | Versioned project configuration, source validation, and repository-root checks. |
+| `initialize` | Multi-integration selection, complete preflight, and atomic generated-file installation. |
+| `integration` | Coding-harness adapter registry and generated plugin and skill artifacts. |
 | `markdown` | Safe GFM rendering, heading fragments, rendered-text projection, and source offset maps. |
 | `anchor` | Line, paragraph, list, section, selection, and general-feedback identity and relocation. |
 | `review` | SQLite schema, document identities, drafts, sessions, immutable batch snapshots, and resolution. |
-| `inbox` | Leasing, acknowledgement, retry, completion, and connector delivery envelopes. |
+| `inbox` | Connector leasing, receipts, retries, and delivery envelopes. |
 | `web` | Loopback HTTP API and embedded frontend assets. |
-| `setup` | Coding-harness connector registry, discovery status, and safe installation. |
+| `skills/truespec-review` | Portable instructions for handling connector-delivered review feedback. |
 
 The browser assets in `web/` are embedded with `include_str!`.
 There is no generated frontend directory to deploy.
 Rendered document HTML stays in memory.
 
 The connector boundary is defined by the [connector protocol specification](openspec/specs/connector-protocol/spec.md).
-OpenCode is one adapter over that protocol, not a dependency of the review core.
+OpenCode is one integration adapter over that protocol, not a dependency of the review core.
 
 ## Current boundaries
 

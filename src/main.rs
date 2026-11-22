@@ -1,8 +1,10 @@
 mod anchor;
 mod inbox;
+mod initialize;
+mod integration;
 mod markdown;
+mod project;
 mod review;
-mod setup;
 mod source;
 mod web;
 
@@ -15,109 +17,63 @@ use std::{
 
 use anyhow::{Result, ensure};
 use clap::{Parser, Subcommand};
-use inbox::{AgentInbox, LocalInbox, PROTOCOL_VERSION};
+use inbox::{LocalInbox, PROTOCOL_VERSION};
 use review::Store;
-use source::SourceKind;
 
 #[derive(Parser)]
 #[command(version, about)]
 struct Cli {
-    /// Workspace root. Agent commands otherwise search the working directory and its parents.
-    #[arg(long, global = true)]
-    root: Option<PathBuf>,
     #[command(subcommand)]
     command: Command,
 }
 
 #[derive(Subcommand)]
 enum Command {
-    /// Start the local browser viewer.
-    Serve {
-        #[arg(long, value_enum, default_value = "openspec")]
-        source: SourceKind,
-        /// Document directory, relative to or inside the workspace.
+    /// Initialize this repository and install coding integrations.
+    Init {
+        /// Document source adapter. Detected when omitted.
         #[arg(long)]
-        docs: Option<PathBuf>,
-        /// Use an explicit loopback port. Zero asks the OS to choose.
-        #[arg(long, default_value_t = 0)]
-        port: u16,
-        /// Emit a versioned JSON startup record instead of human-readable lines.
+        source: Option<String>,
+        /// Source directory relative to the repository root.
         #[arg(long)]
-        json: bool,
-        /// Delete this workspace's local TrueSpec state before starting.
+        source_path: Option<PathBuf>,
+        /// Coding integration to install. Repeat to install several.
+        #[arg(long = "integration", conflicts_with = "all")]
+        integration: Vec<String>,
+        /// Install every supported integration.
+        #[arg(long, conflicts_with = "integration")]
+        all: bool,
+        /// Replace differing generated integration files.
         #[arg(long)]
-        reset_state: bool,
+        force: bool,
     },
-    /// Listen for manual inbox work until activity or an inactivity timeout.
-    Listen {
-        #[arg(long)]
-        session: String,
-        /// Exit after this period without a batch or review end.
-        #[arg(long, default_value = "30m", value_parser = parse_idle_timeout)]
-        idle_timeout: Duration,
-        /// Emit compact JSON on stdout.
-        #[arg(long)]
-        json: bool,
-    },
-    /// Acknowledge receipt and renew the delivery lease.
-    Ack {
-        batch_id: String,
-        #[arg(long)]
-        lease: String,
-    },
-    /// Record completion of one item without posting a browser reply.
-    Complete {
-        batch_id: String,
-        comment_id: String,
-        #[arg(long)]
-        lease: String,
-    },
-    /// Store one final Markdown reply for a manually delivered batch.
-    Reply {
-        batch_id: String,
-        /// Read Markdown from this file, or use - for stdin.
-        #[arg(long)]
-        body_file: PathBuf,
-        /// Stable retry key. Defaults to one deterministic ID per batch.
-        #[arg(long)]
-        reply_id: Option<String>,
-    },
-    /// Associate a moved Markdown file with its existing annotation history.
-    Relink {
-        old_path: PathBuf,
-        new_path: PathBuf,
-    },
-    /// Pair and deliver feedback through a local coding harness connector.
+    #[command(hide = true)]
     Connector {
+        #[arg(long)]
+        root: Option<PathBuf>,
         #[arg(long, default_value_t = PROTOCOL_VERSION)]
         protocol: u8,
         #[command(subcommand)]
         command: ConnectorCommand,
     },
-    /// Install optional coding-harness integrations.
-    Setup {
-        /// Coding harness connector to install. Repeat to install several.
-        #[arg(long, value_enum, conflicts_with_all = ["all", "list"])]
-        connector: Vec<setup::Connector>,
-        /// Install every supported connector.
-        #[arg(long, conflicts_with_all = ["connector", "list"])]
-        all: bool,
-        /// Show supported connectors and installation state without changing files.
-        #[arg(long, conflicts_with_all = ["connector", "all", "force"])]
-        list: bool,
-        /// Replace a plugin file that differs from TrueSpec's generated copy.
-        #[arg(long)]
-        force: bool,
-    },
 }
 
 #[derive(Subcommand)]
 enum ConnectorCommand {
+    /// Start the initialized loopback viewer.
+    Serve {
+        /// Use an explicit loopback port. Zero asks the OS to choose.
+        #[arg(long, default_value_t = 0)]
+        port: u16,
+        /// Emit a versioned JSON startup record.
+        #[arg(long)]
+        json: bool,
+        /// Delete only local review state before starting.
+        #[arg(long)]
+        reset_state: bool,
+    },
     /// Pair with the open review or start a new review if the previous one ended.
     Attach {
-        /// Optional document source to validate and use for workspace discovery.
-        #[arg(long, value_enum)]
-        source: Option<SourceKind>,
         #[arg(long)]
         kind: String,
         #[arg(long)]
@@ -166,116 +122,86 @@ enum ConnectorCommand {
 }
 
 fn main() -> Result<()> {
-    let Cli { root, command } = Cli::parse();
-    let root = root.as_deref();
-    match command {
-        Command::Serve {
-            source: kind,
-            docs,
-            port,
-            json,
-            reset_state,
+    match Cli::parse().command {
+        Command::Init {
+            source,
+            source_path,
+            integration,
+            all,
+            force,
         } => {
-            let root =
-                source::workspace(root, matches!(kind, SourceKind::OpenSpec) && docs.is_none())?;
-            let adapter = source::open(&root, docs.as_deref(), kind)?;
-            if reset_state {
-                review::reset_state(&root)?;
-            }
-            let store = Store::open(&root, true)?;
-            tokio::runtime::Builder::new_multi_thread()
-                .enable_all()
-                .build()?
-                .block_on(web::serve(store, adapter, root, kind.name(), port, json))
-        }
-        Command::Listen {
-            session,
-            idle_timeout,
-            json,
-        } => {
-            let inbox = LocalInbox(Store::open(&review::agent_root(root)?, false)?);
-            let envelope = inbox.listen(&session, idle_timeout)?;
-            let output = if json {
-                serde_json::to_string(&envelope)?
-            } else {
-                serde_json::to_string_pretty(&envelope)?
+            let root = project::ProjectConfig::repository_root()?;
+            let config = project::ProjectConfig::initialize(
+                &root,
+                source.as_deref(),
+                source_path.as_deref(),
+            )?;
+            let integrations = initialize::select_integrations(&integration, all)?;
+            let context = integration::InstallContext {
+                binary: std::env::current_exe()?.canonicalize()?,
+                config_dir: integration::config_dir()?,
             };
-            println!("{output}");
-            Ok(())
-        }
-        Command::Ack { batch_id, lease } => {
-            let inbox = LocalInbox(Store::open(&review::agent_root(root)?, false)?);
-            let expires = inbox.acknowledge(&batch_id, &lease)?;
-            println!("Receipt recorded. Lease expires at {expires} Unix milliseconds.");
-            Ok(())
-        }
-        Command::Complete {
-            batch_id,
-            comment_id,
-            lease,
-        } => {
-            let inbox = LocalInbox(Store::open(&review::agent_root(root)?, false)?);
-            inbox.complete(&batch_id, &comment_id, &lease)?;
-            println!("Completed {comment_id}.");
-            Ok(())
-        }
-        Command::Reply {
-            batch_id,
-            body_file,
-            reply_id,
-        } => {
-            let body = read_reply_body(&body_file)?;
-            let reply_id = reply_id.unwrap_or_else(|| format!("manual:{batch_id}"));
-            let store = Store::open(&review::agent_root(root)?, false)?;
-            store.record_manual_reply(&batch_id, &reply_id, &body)?;
-            println!("Stored reply for {batch_id}.");
-            Ok(())
-        }
-        Command::Relink { old_path, new_path } => {
-            let root = review::agent_root(root)?;
-            source::check_relative(&old_path)?;
-            match root.join(&old_path).symlink_metadata() {
-                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
-                Err(err) => return Err(err.into()),
-                Ok(_) => ensure!(
-                    false,
-                    "The old source still exists. Only missing paths can be relinked."
-                ),
+            let changed =
+                initialize::InitPlan::build(&root, &config, &integrations, &context, force)?
+                    .apply()?;
+            println!("Initialized TrueSpec in {}", root.display());
+            println!(
+                "Document source: {} ({})",
+                config.adapter().label(),
+                config.source_path().display()
+            );
+            for path in changed {
+                println!("Installed {}", path.display());
             }
-            let from = source::as_locator(&old_path)?;
-            let to = source::existing_locator(&root, &new_path)?;
-            let id = Store::open(&root, false)?.relink(&from, &to)?;
-            println!("Relinked {id} from {from} to {to}.");
             Ok(())
         }
-        Command::Connector { protocol, command } => {
+        Command::Connector {
+            root,
+            protocol,
+            command,
+        } => {
             ensure!(
                 protocol == PROTOCOL_VERSION,
                 "Unsupported connector protocol {protocol}; expected {PROTOCOL_VERSION}."
             );
-            connector(root, command)
+            connector(root.as_deref(), command)
         }
-        Command::Setup {
-            connector,
-            all,
-            list,
-            force,
-        } => setup::run(connector, all, list, force),
     }
 }
 
 fn connector(root: Option<&std::path::Path>, command: ConnectorCommand) -> Result<()> {
+    if let ConnectorCommand::Serve {
+        port,
+        json,
+        reset_state,
+    } = command
+    {
+        let (root, config) = configured_project(root)?;
+        let adapter = config.adapter().open(&root, config.source_path())?;
+        if reset_state {
+            review::reset_state(&root)?;
+        }
+        let store = Store::open(&root, true)?;
+        return tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()?
+            .block_on(web::serve(
+                store,
+                adapter,
+                root,
+                config.adapter().label(),
+                port,
+                json,
+            ));
+    }
+    let (root, config) = configured_project(root)?;
     let output = match command {
         ConnectorCommand::Attach {
-            source: kind,
             kind: name,
             destination,
             label,
         } => {
-            let root = source::workspace(root, matches!(kind, Some(SourceKind::OpenSpec)))?;
-            if let Some(kind) = kind {
-                source::open(&root, None, kind)?;
-            }
+            config.adapter().open(&root, config.source_path())?;
             let binding = Store::open(&root, true)?.bind_connector(&name, &destination, &label)?;
             serde_json::json!({
                 "protocol_version": PROTOCOL_VERSION,
@@ -285,7 +211,7 @@ fn connector(root: Option<&std::path::Path>, command: ConnectorCommand) -> Resul
             })
         }
         ConnectorCommand::Poll { connection, wait } => {
-            let inbox = LocalInbox(Store::open(&review::agent_root(root)?, false)?);
+            let inbox = LocalInbox(Store::open(&root, false)?);
             serde_json::to_value(inbox.poll_connector(&connection, Duration::from_secs(wait))?)?
         }
         ConnectorCommand::Delivered {
@@ -294,7 +220,7 @@ fn connector(root: Option<&std::path::Path>, command: ConnectorCommand) -> Resul
             lease,
             receipt,
         } => {
-            let inbox = LocalInbox(Store::open(&review::agent_root(root)?, false)?);
+            let inbox = LocalInbox(Store::open(&root, false)?);
             inbox.delivered(&connection, &batch_id, &lease, &receipt)?;
             serde_json::json!({"protocol_version": PROTOCOL_VERSION, "event": "delivered"})
         }
@@ -304,7 +230,7 @@ fn connector(root: Option<&std::path::Path>, command: ConnectorCommand) -> Resul
             lease,
             retry_after,
         } => {
-            let inbox = LocalInbox(Store::open(&review::agent_root(root)?, false)?);
+            let inbox = LocalInbox(Store::open(&root, false)?);
             inbox.defer(&connection, &batch_id, &lease, retry_after)?;
             serde_json::json!({"protocol_version": PROTOCOL_VERSION, "event": "deferred"})
         }
@@ -315,13 +241,23 @@ fn connector(root: Option<&std::path::Path>, command: ConnectorCommand) -> Resul
             body_file,
         } => {
             let body = read_reply_body(&body_file)?;
-            let store = Store::open(&review::agent_root(root)?, false)?;
+            let store = Store::open(&root, false)?;
             store.record_reply(&connection, &batch_id, &reply_id, &body)?;
             serde_json::json!({"protocol_version": PROTOCOL_VERSION, "event": "responded"})
         }
+        ConnectorCommand::Serve { .. } => unreachable!(),
     };
     println!("{}", serde_json::to_string(&output)?);
     Ok(())
+}
+
+fn configured_project(root: Option<&Path>) -> Result<(PathBuf, project::ProjectConfig)> {
+    let root = match root {
+        Some(root) => root.canonicalize()?,
+        None => std::env::current_dir()?.canonicalize()?,
+    };
+    let config = project::ProjectConfig::load(&root)?;
+    Ok((root, config))
 }
 
 fn read_reply_body(path: &Path) -> Result<String> {
@@ -334,12 +270,4 @@ fn read_reply_body(path: &Path) -> Result<String> {
     }
     ensure!(bytes.len() as u64 <= LIMIT, "Agent reply exceeds 1 MiB");
     Ok(String::from_utf8(bytes)?)
-}
-
-fn parse_idle_timeout(value: &str) -> Result<Duration, String> {
-    let duration = humantime::parse_duration(value).map_err(|error| error.to_string())?;
-    if duration.is_zero() || duration > Duration::from_secs(24 * 60 * 60) {
-        return Err("duration must be greater than zero and no more than 24h".into());
-    }
-    Ok(duration)
 }

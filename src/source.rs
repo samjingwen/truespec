@@ -5,29 +5,12 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail, ensure};
-use clap::ValueEnum;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
 const MAX_DOCUMENT_BYTES: u64 = 2 * 1024 * 1024;
 const STATE: &str = "truespec/.state";
 const CONFIG: &str = "truespec/config";
-
-#[derive(Clone, Copy, Debug, ValueEnum)]
-pub enum SourceKind {
-    #[value(name = "openspec")]
-    OpenSpec,
-    Markdown,
-}
-
-impl SourceKind {
-    pub fn name(self) -> &'static str {
-        match self {
-            Self::OpenSpec => "OpenSpec",
-            Self::Markdown => "Markdown",
-        }
-    }
-}
 
 #[derive(Debug, Serialize)]
 pub struct Document {
@@ -47,59 +30,108 @@ pub trait DocumentSource: Send + Sync {
     fn read(&self, locator: &str) -> Result<Option<Snapshot>>;
 }
 
-pub fn workspace(root: Option<&Path>, discover_openspec: bool) -> Result<PathBuf> {
-    if let Some(root) = root {
-        let root = root
-            .canonicalize()
-            .with_context(|| format!("Cannot find workspace {}", root.display()))?;
-        ensure!(root.is_dir(), "Workspace must be a directory");
-        return Ok(root);
-    }
-    let cwd = std::env::current_dir()?.canonicalize()?;
-    if discover_openspec {
-        for path in cwd.ancestors() {
-            if path.join("openspec").is_dir() {
-                return Ok(path.to_owned());
-            }
-            // A nested checkout or linked worktree must not borrow an ancestor's specs.
-            if path.join(".git").symlink_metadata().is_ok() {
-                break;
-            }
-        }
-        bail!(
-            "No openspec/ directory found in this workspace. Specify --root and --docs, or use --source markdown."
-        );
-    }
-    Ok(cwd)
+pub trait SourceAdapter: Sync {
+    fn id(&self) -> &'static str;
+    fn label(&self) -> &'static str;
+    fn default_path(&self) -> &'static Path;
+    fn detect(&self, root: &Path) -> bool;
+    fn open(&self, root: &Path, path: &Path) -> Result<Box<dyn DocumentSource>>;
 }
 
-pub fn open(root: &Path, docs: Option<&Path>, kind: SourceKind) -> Result<Box<dyn DocumentSource>> {
-    let docs = docs.unwrap_or(match kind {
-        SourceKind::OpenSpec => Path::new("openspec"),
-        SourceKind::Markdown => Path::new("."),
-    });
-    let tree = Tree::new(root, docs)?;
-    Ok(match kind {
-        SourceKind::OpenSpec => Box::new(OpenSpecSource(tree)),
-        SourceKind::Markdown => Box::new(MarkdownFolderSource(tree)),
-    })
+struct OpenSpecAdapter;
+struct MarkdownAdapter;
+
+static OPEN_SPEC_ADAPTER: OpenSpecAdapter = OpenSpecAdapter;
+static MARKDOWN_ADAPTER: MarkdownAdapter = MarkdownAdapter;
+static SOURCE_ADAPTERS: [&'static dyn SourceAdapter; 2] = [&OPEN_SPEC_ADAPTER, &MARKDOWN_ADAPTER];
+
+pub fn adapters() -> &'static [&'static dyn SourceAdapter] {
+    &SOURCE_ADAPTERS
 }
 
-/// Convert an existing workspace file to its adapter-independent locator.
-pub fn existing_locator(root: &Path, path: &Path) -> Result<String> {
+pub fn adapter(id: &str) -> Option<&'static dyn SourceAdapter> {
+    adapters()
+        .iter()
+        .copied()
+        .find(|adapter| adapter.id() == id)
+}
+
+pub fn detect(root: &Path) -> &'static dyn SourceAdapter {
+    adapters()
+        .iter()
+        .copied()
+        .find(|adapter| adapter.detect(root))
+        .expect("the Markdown adapter is the fallback")
+}
+
+impl SourceAdapter for OpenSpecAdapter {
+    fn id(&self) -> &'static str {
+        "openspec"
+    }
+
+    fn label(&self) -> &'static str {
+        "OpenSpec"
+    }
+
+    fn default_path(&self) -> &'static Path {
+        Path::new("openspec")
+    }
+
+    fn detect(&self, root: &Path) -> bool {
+        root.join(self.default_path()).is_dir()
+    }
+
+    fn open(&self, root: &Path, path: &Path) -> Result<Box<dyn DocumentSource>> {
+        Ok(Box::new(OpenSpecSource(Tree::new(root, path)?)))
+    }
+}
+
+impl SourceAdapter for MarkdownAdapter {
+    fn id(&self) -> &'static str {
+        "markdown"
+    }
+
+    fn label(&self) -> &'static str {
+        "Markdown"
+    }
+
+    fn default_path(&self) -> &'static Path {
+        Path::new(".")
+    }
+
+    fn detect(&self, _root: &Path) -> bool {
+        true
+    }
+
+    fn open(&self, root: &Path, path: &Path) -> Result<Box<dyn DocumentSource>> {
+        Ok(Box::new(MarkdownFolderSource(Tree::new(root, path)?)))
+    }
+}
+
+pub fn validate_source_path(root: &Path, path: &Path) -> Result<String> {
+    if path != Path::new(".") {
+        check_relative(path)?;
+    }
     let candidate = root.join(path);
-    let canonical = candidate.canonicalize()?;
-    let relative = canonical.strip_prefix(root)?;
-    check_relative(relative)?;
+    let canonical = candidate
+        .canonicalize()
+        .with_context(|| format!("Cannot find source directory {}", candidate.display()))?;
+    let relative = canonical
+        .strip_prefix(root)
+        .context("Source path must stay inside the repository")?;
     ensure!(
-        !excluded(relative) && markdown(relative) && canonical.is_file(),
-        "The destination must be a Markdown file inside the workspace"
+        canonical.is_dir() && !excluded(relative),
+        "Source path must be a readable directory outside TrueSpec state"
     );
     ensure!(
         candidate == canonical,
-        "Use the canonical destination path without symlinks or '..'"
+        "Source path must not contain symlinks or non-canonical components"
     );
-    as_locator(relative)
+    if relative.as_os_str().is_empty() {
+        Ok(".".into())
+    } else {
+        as_locator(relative)
+    }
 }
 
 pub fn check_relative(path: &Path) -> Result<()> {
@@ -357,7 +389,10 @@ mod tests {
         for (path, _, _) in paths {
             write(&root, path);
         }
-        let src = open(&root, None, SourceKind::OpenSpec).unwrap();
+        let src = adapter("openspec")
+            .unwrap()
+            .open(&root, Path::new("openspec"))
+            .unwrap();
         let entries = src.list().unwrap();
         assert_eq!(entries.len(), paths.len());
         for (path, kind, group) in paths {
@@ -384,7 +419,10 @@ mod tests {
         }
         #[cfg(unix)]
         std::os::unix::fs::symlink(root.join("outside.md"), root.join("docs/linked.md")).unwrap();
-        let src = open(&root, Some(Path::new("docs")), SourceKind::Markdown).unwrap();
+        let src = adapter("markdown")
+            .unwrap()
+            .open(&root, Path::new("docs"))
+            .unwrap();
         assert_eq!(
             src.list()
                 .unwrap()
@@ -396,8 +434,46 @@ mod tests {
         assert!(src.read("outside.md").unwrap().is_none());
         assert!(src.read("docs/linked.md").unwrap().is_none());
         assert!(src.read("../outside.md").is_err());
-        let all = open(&root, None, SourceKind::Markdown).unwrap();
+        let all = adapter("markdown")
+            .unwrap()
+            .open(&root, Path::new("."))
+            .unwrap();
         assert_eq!(all.list().unwrap().len(), 2);
         assert!(all.read("truespec/.state/secret.md").unwrap().is_none());
+    }
+
+    #[test]
+    fn source_registry_detects_and_preserves_adapter_independent_paths() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        write(&root, "guide.md");
+        assert_eq!(detect(&root).id(), "markdown");
+        write(&root, "openspec/specs/guide/spec.md");
+        assert_eq!(detect(&root).id(), "openspec");
+        assert!(adapter("missing").is_none());
+
+        let openspec = adapter("openspec")
+            .unwrap()
+            .open(&root, Path::new("openspec"))
+            .unwrap();
+        let markdown = adapter("markdown")
+            .unwrap()
+            .open(&root, Path::new("."))
+            .unwrap();
+        let expected = "openspec/specs/guide/spec.md";
+        assert!(
+            openspec
+                .list()
+                .unwrap()
+                .iter()
+                .any(|doc| doc.path == expected)
+        );
+        assert!(
+            markdown
+                .list()
+                .unwrap()
+                .iter()
+                .any(|doc| doc.path == expected)
+        );
     }
 }

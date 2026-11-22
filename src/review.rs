@@ -58,21 +58,6 @@ pub fn conflict(message: impl Into<String>) -> anyhow::Error {
 #[derive(Clone)]
 pub struct Store(PathBuf);
 
-pub fn agent_root(root: Option<&Path>) -> Result<PathBuf> {
-    if let Some(root) = root {
-        let root = root
-            .canonicalize()
-            .with_context(|| format!("Cannot find workspace {}", root.display()))?;
-        ensure!(root.is_dir(), "Workspace must be a directory");
-        return Ok(root);
-    }
-    let cwd = std::env::current_dir()?.canonicalize()?;
-    cwd.ancestors()
-        .find(|path| path.join(STORE_PATH).is_file())
-        .map(Path::to_path_buf)
-        .context("No TrueSpec review database found. Run from the workspace or pass --root.")
-}
-
 pub fn reset_state(root: &Path) -> Result<()> {
     let root = root
         .canonicalize()
@@ -343,6 +328,18 @@ impl Store {
                 )?;
                 id
             };
+            tx.execute(
+                "UPDATE batches
+                 SET connector_id = ?1, lease_token = NULL, lease_until = NULL,
+                     lease_received_at = NULL, retry_at = NULL
+                 WHERE session_id = ?2 AND connector_id IS NULL
+                   AND EXISTS (
+                     SELECT 1 FROM batch_items
+                     WHERE batch_items.batch_id = batches.id
+                       AND batch_items.completed_at IS NULL
+                   )",
+                params![connection_id, review.id],
+            )?;
             Ok(Binding { connection_id, review_id: review.id })
         })
     }
@@ -420,44 +417,6 @@ impl Store {
             .ok_or_else(|| Problem::Missing("Document not found.").into())
     }
 
-    pub fn relink(&self, from: &str, to: &str) -> Result<String> {
-        self.write(|tx| {
-            let Some(id): Option<String> = tx
-                .query_row("SELECT id FROM documents WHERE path = ?1", [from], |row| {
-                    row.get(0)
-                })
-                .optional()?
-            else {
-                return Err(
-                    Problem::Missing("The old path has no TrueSpec document identity.").into(),
-                );
-            };
-            if let Some(destination) = tx
-                .query_row("SELECT id FROM documents WHERE path = ?1", [to], |row| {
-                    row.get::<_, String>(0)
-                })
-                .optional()?
-            {
-                let used: bool = tx.query_row(
-                    "SELECT EXISTS (SELECT 1 FROM comments WHERE document_id = ?1)",
-                    [&destination],
-                    |row| row.get(0),
-                )?;
-                if used {
-                    return Err(conflict(
-                        "The destination already has its own review history.",
-                    ));
-                }
-                tx.execute("DELETE FROM documents WHERE id = ?1", [&destination])?;
-            }
-            tx.execute(
-                "UPDATE documents SET path = ?2 WHERE id = ?1",
-                params![id, to],
-            )?;
-            Ok(id)
-        })
-    }
-
     pub fn comments(&self) -> Result<Vec<Comment>> {
         let con = self.connect()?;
         let mut stmt = con.prepare(&format!("{COMMENTS} ORDER BY f.sequence"))?;
@@ -512,16 +471,12 @@ impl Store {
         reply_id: &str,
         body: &str,
     ) -> Result<()> {
-        self.record_reply_inner(Some(connection), batch_id, reply_id, body)
-    }
-
-    pub fn record_manual_reply(&self, batch_id: &str, reply_id: &str, body: &str) -> Result<()> {
-        self.record_reply_inner(None, batch_id, reply_id, body)
+        self.record_reply_inner(connection, batch_id, reply_id, body)
     }
 
     fn record_reply_inner(
         &self,
-        connection: Option<&str>,
+        connection: &str,
         batch_id: &str,
         reply_id: &str,
         body: &str,
@@ -543,26 +498,16 @@ impl Store {
                     Err(conflict("This batch already has a different agent reply."))
                 };
             }
-            let belongs: bool = if let Some(connection) = connection {
-                tx.query_row(
-                    "SELECT EXISTS (SELECT 1 FROM batches
-                     WHERE id = ?1 AND connector_id = ?2 AND connector_receipt IS NOT NULL)",
-                    params![batch_id, connection],
-                    |row| row.get(0),
-                )?
-            } else {
-                tx.query_row(
-                    "SELECT EXISTS (SELECT 1 FROM batches
-                     WHERE id = ?1 AND connector_id IS NULL AND first_received_at IS NOT NULL)",
-                    [batch_id],
-                    |row| row.get(0),
-                )?
-            };
+            let belongs: bool = tx.query_row(
+                "SELECT EXISTS (SELECT 1 FROM batches
+                 WHERE id = ?1 AND connector_id = ?2 AND connector_receipt IS NOT NULL)",
+                params![batch_id, connection],
+                |row| row.get(0),
+            )?;
             if !belongs {
-                return Err(conflict(match connection {
-                    Some(_) => "The delivered batch does not belong to this connector.",
-                    None => "Acknowledge this manual batch before storing its reply.",
-                }));
+                return Err(conflict(
+                    "The delivered batch does not belong to this connector.",
+                ));
             }
             let created = now();
             tx.execute(
@@ -1017,6 +962,181 @@ mod tests {
                 [],
             )
             .unwrap();
+    }
+
+    #[test]
+    fn connector_adopts_only_outstanding_manual_batch_items() {
+        let fixture = tempfile::tempdir().unwrap();
+        let root = fixture.path().canonicalize().unwrap();
+        let store = Store::open(&root, true).unwrap();
+        let review = store.current_session().unwrap();
+        let connection = store.connect().unwrap();
+        connection
+            .execute(
+                "INSERT INTO documents (id, path) VALUES ('document', 'guide.md')",
+                [],
+            )
+            .unwrap();
+        for comment in [
+            "unreceived",
+            "leased",
+            "partial-done",
+            "partial-open",
+            "handled",
+        ] {
+            connection
+                .execute(
+                    "INSERT INTO comments (id, document_id, body, anchor)
+                     VALUES (?1, 'document', ?1, '{}')",
+                    [comment],
+                )
+                .unwrap();
+        }
+        let insert_batch = |id: &str, key: &str, created: i64, count: i64| {
+            connection
+                .execute(
+                    "INSERT INTO batches
+                     (id, session_id, request_key, request, ended, created, item_count)
+                     VALUES (?1, ?2, ?3, '{}', 0, ?4, ?5)",
+                    params![id, review.id, key, created, count],
+                )
+                .unwrap();
+        };
+        insert_batch("unreceived-batch", "one", 1, 1);
+        insert_batch("leased-batch", "two", 2, 1);
+        insert_batch("partial-batch", "three", 3, 2);
+        insert_batch("handled-batch", "four", 4, 1);
+        connection
+            .execute(
+                "UPDATE batches
+                 SET lease_token = 'manual-lease', lease_until = 9999999999999,
+                     first_received_at = 10, lease_received_at = 10, attempt = 2
+                 WHERE id = 'leased-batch'",
+                [],
+            )
+            .unwrap();
+        for (batch, comment, ordinal, completed) in [
+            ("unreceived-batch", "unreceived", 0, None),
+            ("leased-batch", "leased", 0, None),
+            ("partial-batch", "partial-done", 0, Some(20)),
+            ("partial-batch", "partial-open", 1, None),
+            ("handled-batch", "handled", 0, Some(30)),
+        ] {
+            connection
+                .execute(
+                    "INSERT INTO batch_items
+                     (batch_id, comment_id, ordinal, snapshot, completed_at, completed_token)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    params![
+                        batch,
+                        comment,
+                        ordinal,
+                        format!("snapshot:{comment}"),
+                        completed,
+                        completed.map(|_| "manual-token")
+                    ],
+                )
+                .unwrap();
+            connection
+                .execute(
+                    "UPDATE comments SET batch_id = ?2 WHERE id = ?1",
+                    params![comment, batch],
+                )
+                .unwrap();
+        }
+        connection
+            .execute(
+                "INSERT INTO agent_replies
+                 (id, batch_id, connector_id, body, created_at)
+                 VALUES ('handled-reply', 'handled-batch', NULL, 'Already handled.', 31)",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO review_feed (kind, reference_id)
+                 VALUES ('agent_reply', 'handled-reply')",
+                [],
+            )
+            .unwrap();
+        drop(connection);
+
+        let binding = store
+            .bind_connector("test", "chat", "Test integration")
+            .unwrap();
+        assert_eq!(binding.review_id, review.id);
+        let connection = store.connect().unwrap();
+        for batch in ["unreceived-batch", "leased-batch", "partial-batch"] {
+            assert_eq!(
+                connection
+                    .query_row(
+                        "SELECT connector_id FROM batches WHERE id = ?1",
+                        [batch],
+                        |row| row.get::<_, String>(0),
+                    )
+                    .unwrap(),
+                binding.connection_id
+            );
+        }
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT connector_id FROM batches WHERE id = 'handled-batch'",
+                    [],
+                    |row| row.get::<_, Option<String>>(0),
+                )
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT lease_token, lease_until, lease_received_at, attempt
+                     FROM batches WHERE id = 'leased-batch'",
+                    [],
+                    |row| {
+                        Ok((
+                            row.get::<_, Option<String>>(0)?,
+                            row.get::<_, Option<i64>>(1)?,
+                            row.get::<_, Option<i64>>(2)?,
+                            row.get::<_, i64>(3)?,
+                        ))
+                    },
+                )
+                .unwrap(),
+            (None, None, None, 2)
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT snapshot, completed_at, completed_token
+                     FROM batch_items WHERE comment_id = 'partial-done'",
+                    [],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, Option<i64>>(1)?,
+                            row.get::<_, Option<String>>(2)?,
+                        ))
+                    },
+                )
+                .unwrap(),
+            (
+                "snapshot:partial-done".into(),
+                Some(20),
+                Some("manual-token".into())
+            )
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT body FROM agent_replies WHERE id = 'handled-reply'",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "Already handled."
+        );
     }
 
     #[cfg(unix)]

@@ -19,15 +19,24 @@ struct Viewer {
 }
 
 impl Viewer {
-    fn start(cwd: &Path, args: &[&str]) -> Self {
-        let mut child = Command::new(CLI)
-            .current_dir(cwd)
+    fn start(root: &Path, adapter: &str, source_path: &str, reset_state: bool) -> Self {
+        write(
+            root,
+            "truespec/config/project.json",
+            &format!(
+                "{{\n  \"version\": 1,\n  \"source\": {{\n    \"adapter\": \"{}\",\n    \"path\": \"{}\"\n  }}\n}}\n",
+                adapter, source_path
+            ),
+        );
+        let mut command = Command::new(CLI);
+        command
+            .current_dir(root)
             .env("PATH", "")
-            .arg("serve")
-            .args(args)
-            .stdout(Stdio::piped())
-            .spawn()
-            .unwrap();
+            .args(["connector", "--protocol", "1", "serve"]);
+        if reset_state {
+            command.arg("--reset-state");
+        }
+        let mut child = command.stdout(Stdio::piped()).spawn().unwrap();
         let mut out = BufReader::new(child.stdout.take().unwrap());
         let mut line = String::new();
         out.read_line(&mut line).unwrap();
@@ -186,16 +195,34 @@ fn command(root: &Path, args: &[&str], success: bool) -> String {
     String::from_utf8(output.stdout).unwrap()
 }
 
-fn listen(root: &Path, review: &str) -> Value {
+fn attach(root: &Path, destination: &str) -> Value {
     serde_json::from_str(&command(
         root,
         &[
-            "listen",
-            "--session",
-            review,
-            "--json",
-            "--idle-timeout",
-            "1ms",
+            "connector",
+            "attach",
+            "--kind",
+            "test",
+            "--destination",
+            destination,
+            "--label",
+            "Test",
+        ],
+        true,
+    ))
+    .unwrap()
+}
+
+fn connector_poll(root: &Path, connection: &str, wait: &str) -> Value {
+    serde_json::from_str(&command(
+        root,
+        &[
+            "connector",
+            "poll",
+            "--connection",
+            connection,
+            "--wait",
+            wait,
         ],
         true,
     ))
@@ -203,7 +230,7 @@ fn listen(root: &Path, review: &str) -> Value {
 }
 
 #[test]
-fn openspec_nested_workspace_and_cross_document_handoff_survive_restart() {
+fn openspec_cross_document_handoff_survives_restart() {
     let root = tempfile::tempdir().unwrap();
     let root = root.path();
     let spec = "openspec/specs/login/spec.md";
@@ -229,7 +256,9 @@ fn openspec_nested_workspace_and_cross_document_handoff_survive_restart() {
         "Markdown outside the default schema",
     );
     write(root, "openspec/changes/archive/older/tasks.md", "# Tasks");
-    let mut first = Viewer::start(&root.join("openspec/specs/login"), &[]);
+    let mut first = Viewer::start(root, "openspec", "openspec", false);
+    let binding = attach(root, "cross-document-chat");
+    let connection = string(&binding["connection_id"]).to_owned();
     let docs = first.get("/api/documents");
     assert_eq!(docs.as_array().unwrap().len(), 5);
     assert!(
@@ -250,10 +279,9 @@ fn openspec_nested_workspace_and_cross_document_handoff_survive_restart() {
     assert!(string(&page["html"]).contains("#scope"));
     let one_comment = first.add(one, 5, "Check the boundary.");
     let two_comment = first.add(two, 5, "Clarify the scope.");
-    assert_eq!(listen(root, &first.review)["event"], "idle_timeout");
     first.stop();
 
-    let mut second = Viewer::start(root, &["--source", "markdown", "--docs", "openspec"]);
+    let mut second = Viewer::start(root, "markdown", "openspec", false);
     assert_eq!(second.review, first.review);
     let docs = second.get("/api/documents");
     assert_eq!(doc_id(&docs, spec), one);
@@ -265,7 +293,6 @@ fn openspec_nested_workspace_and_cross_document_handoff_survive_restart() {
     ] });
     second.post(&second.api("/submit"), 409, wrong);
     assert_eq!(second.board()["review"]["ended"], false);
-    assert_eq!(listen(root, &second.review)["event"], "idle_timeout");
     let send = json!({ "key": Uuid::new_v4(), "end": true, "drafts": drafts });
     let sent = second.post(&second.api("/submit"), 200, send.clone());
     assert_eq!(sent["count"], 2);
@@ -285,10 +312,7 @@ fn openspec_nested_workspace_and_cross_document_handoff_survive_restart() {
         root.join("openspec/changes/tweak/renamed.md"),
     )
     .unwrap();
-    let moved = "openspec/changes/tweak/renamed.md";
-    let relink = command(root, &["relink", proposal, moved], true);
-    assert!(relink.contains(two));
-    let envelope = listen(root, &second.review);
+    let envelope = connector_poll(root, &connection, "0");
     assert_eq!(envelope["event"], "batch");
     assert_eq!(envelope["session_ended"], true);
     let batch = string(&envelope["batch_id"]);
@@ -301,32 +325,43 @@ fn openspec_nested_workspace_and_cross_document_handoff_survive_restart() {
     assert_eq!(envelope["items"][1]["body"], "Clarify the scope.");
     command(
         root,
-        &["complete", batch, &one_comment, "--lease", lease],
-        false,
+        &[
+            "connector",
+            "delivered",
+            batch,
+            "--connection",
+            &connection,
+            "--lease",
+            lease,
+            "--receipt",
+            "cross-document-message",
+        ],
+        true,
     );
-    command(root, &["ack", batch, "--lease", lease], true);
-    for item in [&one_comment, &one_comment, &two_comment] {
-        command(root, &["complete", batch, item, "--lease", lease], true);
-    }
-    assert_eq!(listen(root, &second.review)["event"], "ended");
-    let mut final_viewer = Viewer::start(root, &["--root", root.to_str().unwrap()]);
+    write(root, "cross-document-reply.md", "Handled both comments.\n");
+    command(
+        root,
+        &[
+            "connector",
+            "respond",
+            batch,
+            "--connection",
+            &connection,
+            "--reply-id",
+            "cross-document-reply",
+            "--body-file",
+            "cross-document-reply.md",
+        ],
+        true,
+    );
+    assert_eq!(connector_poll(root, &connection, "0")["event"], "ended");
+    let mut final_viewer = Viewer::start(root, "markdown", "openspec", false);
     let history = final_viewer.board();
-    assert_eq!(history["comments"][0]["delivery"], "completed");
+    assert_eq!(history["comments"][0]["delivery"], "replied");
     assert_eq!(history["comments"][0]["resolved"], false);
-    assert_eq!(history["comments"][1]["path"], moved);
+    assert_eq!(history["comments"][1]["path"], proposal);
     assert_eq!(history["comments"][1]["anchor"]["path"], proposal);
-    let new_review = final_viewer.post(&final_viewer.api("/new"), 200, json!({}));
-    final_viewer.post(
-        &format!(
-            "/api/reviews/{}/comments/{one_comment}",
-            string(&new_review["id"])
-        ),
-        204,
-        json!({
-            "action": "resolve", "resolved": true,
-        }),
-    );
-    assert_eq!(final_viewer.board()["comments"][0]["resolved"], true);
+    assert_eq!(history["comments"][1]["location"]["status"], "missing");
     final_viewer.stop();
 }
 
@@ -341,17 +376,9 @@ fn markdown_refresh_and_stale_confirmation_keep_the_original_context() {
         "# Spec\n\nA stable statement.\n\n| A | B |\n|---|---|\n| 1 | 2 |\n\n<script>throw 1</script>\n",
     );
     write(root, "elsewhere.md", "# Not part of this source");
-    let mut viewer = Viewer::start(
-        root,
-        &[
-            "--root",
-            root.to_str().unwrap(),
-            "--source",
-            "markdown",
-            "--docs",
-            "docs",
-        ],
-    );
+    let mut viewer = Viewer::start(root, "markdown", "docs", false);
+    let binding = attach(root, "stale-context-chat");
+    let connection = string(&binding["connection_id"]).to_owned();
     let docs = viewer.get("/api/documents");
     assert_eq!(docs.as_array().unwrap().len(), 1);
     let id = doc_id(&docs, source);
@@ -401,11 +428,6 @@ fn markdown_refresh_and_stale_confirmation_keep_the_original_context() {
         }),
     );
     let id = viewer.add(id, 1, "Clarify the statement.");
-    viewer.post(&viewer.api("/end"), 409, json!({ "keep_drafts": false }));
-    viewer.post(&viewer.api("/end"), 204, json!({ "keep_drafts": true }));
-    assert_eq!(listen(root, &viewer.review)["event"], "ended");
-    let next = viewer.post(&viewer.api("/new"), 200, json!({}));
-    viewer.review = string(&next["id"]).to_owned();
     assert_eq!(
         viewer.board()["comments"][0]["body"],
         "Clarify the statement."
@@ -430,7 +452,7 @@ fn markdown_refresh_and_stale_confirmation_keep_the_original_context() {
     send["confirmation"] = before["confirmation"].clone();
     viewer.post(&viewer.api("/submit"), 200, send);
     viewer.stop();
-    let envelope = listen(root, &viewer.review);
+    let envelope = connector_poll(root, &connection, "0");
     assert_eq!(envelope["items"][0]["original"]["heading"][0], "Spec");
     assert_eq!(envelope["items"][0]["original"]["original"]["line"], 1);
     assert_eq!(
@@ -444,17 +466,18 @@ fn a_waiting_agent_exits_when_a_browser_review_ends_without_feedback() {
     let fixture = tempfile::tempdir().unwrap();
     let root = fixture.path();
     write(root, "guide.md", "# Guide");
-    let mut viewer = Viewer::start(root, &["--source", "markdown"]);
+    let mut viewer = Viewer::start(root, "markdown", ".", false);
+    let binding = attach(root, "waiting-chat");
     let listener = Command::new(CLI)
         .current_dir(root)
         .env("PATH", "")
         .args([
-            "listen",
-            "--session",
-            &viewer.review,
-            "--json",
-            "--idle-timeout",
-            "30s",
+            "connector",
+            "poll",
+            "--connection",
+            string(&binding["connection_id"]),
+            "--wait",
+            "30",
         ])
         .stdout(Stdio::piped())
         .spawn()
@@ -472,105 +495,255 @@ fn a_waiting_agent_exits_when_a_browser_review_ends_without_feedback() {
 }
 
 #[test]
-fn manual_listen_and_reply_mirrors_one_batch_response() {
+fn hidden_viewer_and_attach_use_initialized_source_configuration() {
+    for (mode, path, source_path) in [
+        ("openspec", "openspec/specs/guide/spec.md", "openspec"),
+        ("markdown", "documentation/guide.md", "documentation"),
+    ] {
+        let fixture = tempfile::tempdir().unwrap();
+        let root = fixture.path();
+        write(root, path, "# Guide\n");
+        let mut viewer = Viewer::start(root, mode, source_path, false);
+        assert!(
+            viewer
+                .get("/api/documents")
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|document| {
+                    document["path"] == path
+                        && document["kind"]
+                            == if mode == "openspec" {
+                                "spec"
+                            } else {
+                                "markdown"
+                            }
+                })
+        );
+        let attached: Value = serde_json::from_str(&command(
+            root,
+            &[
+                "connector",
+                "--protocol",
+                "1",
+                "attach",
+                "--kind",
+                "test",
+                "--destination",
+                "chat",
+                "--label",
+                "Test",
+            ],
+            true,
+        ))
+        .unwrap();
+        assert_eq!(attached["review_id"], viewer.review);
+        viewer.stop();
+    }
+
     let fixture = tempfile::tempdir().unwrap();
     let root = fixture.path();
-    write(root, "guide.md", "# Guide\n\nOriginal text.\n");
-    let mut viewer = Viewer::start(root, &["--source", "markdown"]);
-    let docs = viewer.get("/api/documents");
-    let document = doc_id(&docs, "guide.md");
-    let comment = viewer.add(document, 3, "Explain this text.");
-    let submitted = viewer.post(
-        &viewer.api("/submit"),
-        200,
-        json!({
-            "key": Uuid::new_v4(), "end": false, "drafts": [{ "id": comment, "version": 1 }],
-        }),
+    fs::create_dir(root.join(".git")).unwrap();
+    write(root, "guide.md", "# Guide\n");
+    write(
+        root,
+        "truespec/config/project.json",
+        "{\n  \"version\": 1,\n  \"source\": {\n    \"adapter\": \"markdown\",\n    \"path\": \".\"\n  }\n}\n",
     );
-    let delivery = listen(root, &viewer.review);
-    let batch = string(&delivery["batch_id"]);
-    let lease = string(&delivery["lease"]);
-    write(root, "reply.md", "This is the explanation.\n");
-    command(root, &["reply", batch, "--body-file", "reply.md"], false);
-    command(root, &["ack", batch, "--lease", lease], true);
-    command(root, &["reply", batch, "--body-file", "reply.md"], true);
-    command(root, &["reply", batch, "--body-file", "reply.md"], true);
-    write(root, "different.md", "A different reply.\n");
     command(
         root,
-        &["reply", batch, "--body-file", "different.md"],
+        &[
+            "connector",
+            "--protocol",
+            "99",
+            "attach",
+            "--kind",
+            "test",
+            "--destination",
+            "chat",
+            "--label",
+            "Test",
+        ],
         false,
     );
-    let board = viewer.board();
-    assert_eq!(board["replies"][0]["batch_id"], submitted["batch_id"]);
-    assert_eq!(board["replies"][0]["body"], "This is the explanation.\n");
-    assert_eq!(board["replies"][0]["comment_ids"][0], comment);
-    assert_eq!(board["comments"][0]["delivery"], "replied");
-    assert_eq!(board["comments"][0]["resolved"], false);
-    viewer.stop();
+    assert!(!root.join("truespec/.state/review.sqlite3").exists());
 }
 
 #[test]
-fn setup_opencode_installs_idempotently_and_protects_changes() {
-    let fixture = tempfile::tempdir().unwrap();
-    let config = fixture.path().join("config");
-    let install = || {
+fn public_help_only_exposes_initialization() {
+    let help = Command::new(CLI).arg("--help").output().unwrap();
+    assert!(help.status.success());
+    let help = String::from_utf8(help.stdout).unwrap();
+    assert!(help.contains("init"));
+    for hidden in [
+        "serve", "setup", "listen", "ack", "complete", "reply", "relink",
+    ] {
+        assert!(!help.contains(&format!("  {hidden}")));
+        assert!(
+            !Command::new(CLI)
+                .arg(hidden)
+                .output()
+                .unwrap()
+                .status
+                .success()
+        );
+    }
+    assert!(!help.contains("  connector"));
+    assert!(
         Command::new(CLI)
-            .args(["setup", "--connector", "opencode"])
-            .env("XDG_CONFIG_HOME", &config)
+            .args(["connector", "--help"])
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+}
+
+#[test]
+fn init_detects_sources_requires_the_root_and_preserves_state() {
+    let fixture = tempfile::tempdir().unwrap();
+    let root = fixture.path();
+    fs::create_dir(root.join(".git")).unwrap();
+    write(root, "openspec/specs/guide/spec.md", "# Guide\n");
+    write(root, "truespec/.state/keep", "preserve");
+    let config_home = root.join("user-config");
+    let run = |cwd: &Path, args: &[&str]| {
+        Command::new(CLI)
+            .current_dir(cwd)
+            .env("XDG_CONFIG_HOME", &config_home)
+            .args(args)
             .output()
             .unwrap()
     };
-    let listed = Command::new(CLI)
-        .args(["setup", "--list"])
-        .env("XDG_CONFIG_HOME", &config)
-        .output()
-        .unwrap();
-    assert!(listed.status.success());
-    assert!(String::from_utf8_lossy(&listed.stdout).contains("opencode"));
-    assert!(String::from_utf8_lossy(&listed.stdout).contains("not installed"));
-    let missing = Command::new(CLI)
-        .arg("setup")
-        .env("XDG_CONFIG_HOME", &config)
-        .output()
-        .unwrap();
+
+    let missing = run(root, &["init"]);
     assert!(!missing.status.success());
-    assert!(
-        String::from_utf8_lossy(&missing.stdout).contains("Available coding harness connectors")
+    assert!(String::from_utf8_lossy(&missing.stderr).contains("--integration opencode"));
+    assert!(!root.join("truespec/config/project.json").exists());
+    let unknown = run(root, &["init", "--integration", "missing"]);
+    assert!(!unknown.status.success());
+    assert!(String::from_utf8_lossy(&unknown.stderr).contains("Unknown coding integration"));
+    assert!(!root.join("truespec/config/project.json").exists());
+
+    let first = run(
+        root,
+        &[
+            "init",
+            "--integration",
+            "opencode",
+            "--integration",
+            "opencode",
+        ],
     );
-    assert!(String::from_utf8_lossy(&missing.stderr).contains("--connector opencode"));
-    let first = install();
+    assert!(
+        first.status.success(),
+        "{}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    let config = fs::read_to_string(root.join("truespec/config/project.json")).unwrap();
+    assert!(config.contains(r#""adapter": "openspec""#));
+    assert!(config.contains(r#""path": "openspec""#));
+    assert_eq!(
+        fs::read_to_string(root.join("truespec/.state/keep")).unwrap(),
+        "preserve"
+    );
+    assert!(
+        run(root, &["init", "--integration", "opencode"])
+            .status
+            .success()
+    );
+
+    fs::create_dir(root.join("nested")).unwrap();
+    let nested = run(&root.join("nested"), &["init", "--integration", "opencode"]);
+    assert!(!nested.status.success());
+    assert!(String::from_utf8_lossy(&nested.stderr).contains("repository root"));
+
+    let markdown = tempfile::tempdir().unwrap();
+    let markdown_root = markdown.path();
+    fs::create_dir(markdown_root.join(".git")).unwrap();
+    write(markdown_root, "documentation/readme.md", "# Read me\n");
+    let explicit = run(
+        markdown_root,
+        &[
+            "init",
+            "--source",
+            "markdown",
+            "--source-path",
+            "documentation",
+            "--all",
+        ],
+    );
+    assert!(
+        explicit.status.success(),
+        "{}",
+        String::from_utf8_lossy(&explicit.stderr)
+    );
+    let config = fs::read_to_string(markdown_root.join("truespec/config/project.json")).unwrap();
+    assert!(config.contains(r#""adapter": "markdown""#));
+    assert!(config.contains(r#""path": "documentation""#));
+}
+
+#[test]
+fn init_installs_and_protects_the_complete_opencode_bundle() {
+    let fixture = tempfile::tempdir().unwrap();
+    let root = fixture.path().join("workspace");
+    fs::create_dir_all(root.join(".git")).unwrap();
+    write(&root, "guide.md", "# Guide\n");
+    let config = fixture.path().join("config");
+    let install = |force| {
+        let mut command = Command::new(CLI);
+        command
+            .current_dir(&root)
+            .args(["init", "--source", "markdown", "--integration", "opencode"])
+            .env("XDG_CONFIG_HOME", &config)
+            .env("PATH", "");
+        if force {
+            command.arg("--force");
+        }
+        command.output().unwrap()
+    };
+    let first = install(false);
     assert!(
         first.status.success(),
         "{}",
         String::from_utf8_lossy(&first.stderr)
     );
     let plugin = config.join("opencode/plugins/truespec/index.ts");
-    let generated = fs::read_to_string(&plugin).unwrap();
-    assert!(!generated.contains("__TRUESPEC_INSTALLED_BINARY__"));
-    assert!(generated.contains(&Path::new(CLI).canonicalize().unwrap().display().to_string()));
-    assert!(install().status.success());
-    let all = Command::new(CLI)
-        .args(["setup", "--all"])
-        .env("XDG_CONFIG_HOME", &config)
-        .output()
-        .unwrap();
-    assert!(all.status.success());
+    let skill = config.join("opencode/skills/truespec-review/SKILL.md");
+    let generated_plugin = fs::read_to_string(&plugin).unwrap();
+    let generated_skill = fs::read_to_string(&skill).unwrap();
+    assert!(!generated_plugin.contains("__TRUESPEC_INSTALLED_BINARY__"));
+    assert!(
+        generated_plugin.contains(&Path::new(CLI).canonicalize().unwrap().display().to_string())
+    );
+    assert!(generated_skill.contains("name: truespec-review"));
+    assert!(generated_skill.contains("Do not invoke TrueSpec transport commands yourself."));
+    assert!(install(false).status.success());
 
+    fs::remove_file(&skill).unwrap();
+    assert!(install(false).status.success());
+    assert_eq!(fs::read_to_string(&skill).unwrap(), generated_skill);
+    assert_eq!(fs::read_to_string(&plugin).unwrap(), generated_plugin);
+
+    fs::remove_file(&skill).unwrap();
     fs::write(&plugin, "// user-owned plugin\n").unwrap();
-    let protected = install();
+    let protected = install(false);
     assert!(!protected.status.success());
+    assert!(!skill.exists());
     assert_eq!(
         fs::read_to_string(&plugin).unwrap(),
         "// user-owned plugin\n"
     );
-    let replaced = Command::new(CLI)
-        .args(["setup", "--connector", "opencode", "--force"])
-        .env("XDG_CONFIG_HOME", &config)
-        .output()
-        .unwrap();
+    let replaced = install(true);
     assert!(replaced.status.success());
-    assert_eq!(fs::read_to_string(&plugin).unwrap(), generated);
+    assert_eq!(fs::read_to_string(&plugin).unwrap(), generated_plugin);
+    assert_eq!(fs::read_to_string(&skill).unwrap(), generated_skill);
+
+    fs::write(&skill, "user-owned skill\n").unwrap();
+    assert!(!install(false).status.success());
+    assert_eq!(fs::read_to_string(&skill).unwrap(), "user-owned skill\n");
+    assert!(install(true).status.success());
+    assert_eq!(fs::read_to_string(&skill).unwrap(), generated_skill);
 }
 
 #[test]
@@ -580,7 +753,7 @@ fn reset_state_starts_fresh_without_touching_documents_or_config() {
     let document = "docs/guide.md";
     write(root, document, "# Guide\n\nReview this.\n");
     write(root, "truespec/config/truespec.yaml", "source: markdown\n");
-    let mut first = Viewer::start(root, &["--source", "markdown", "--docs", "docs"]);
+    let mut first = Viewer::start(root, "markdown", "docs", false);
     let docs = first.get("/api/documents");
     let id = doc_id(&docs, document);
     first.add(id, 3, "This draft should be reset.");
@@ -588,10 +761,7 @@ fn reset_state_starts_fresh_without_touching_documents_or_config() {
     assert_eq!(first.board()["comments"].as_array().unwrap().len(), 1);
     first.stop();
 
-    let mut reset = Viewer::start(
-        root,
-        &["--source", "markdown", "--docs", "docs", "--reset-state"],
-    );
+    let mut reset = Viewer::start(root, "markdown", "docs", true);
     assert_ne!(reset.review, previous_review);
     assert!(reset.board()["comments"].as_array().unwrap().is_empty());
     assert_eq!(
@@ -611,7 +781,8 @@ fn previously_saved_section_drafts_can_still_be_submitted() {
     let fixture = tempfile::tempdir().unwrap();
     let root = fixture.path();
     write(root, "guide.md", "# Guide\n\nOriginal context.");
-    let mut viewer = Viewer::start(root, &["--source", "markdown"]);
+    let mut viewer = Viewer::start(root, "markdown", ".", false);
+    let binding = attach(root, "saved-section-chat");
     let docs = viewer.get("/api/documents");
     let document_id = doc_id(&docs, "guide.md");
     let revision = viewer.get(&format!("/api/documents/{document_id}"))["revision"].clone();
@@ -650,7 +821,8 @@ fn previously_saved_section_drafts_can_still_be_submitted() {
     );
     viewer.stop();
     assert_eq!(
-        listen(root, &viewer.review)["items"][0]["original"]["original"]["kind"],
+        connector_poll(root, string(&binding["connection_id"]), "0")["items"][0]["original"]["original"]
+            ["kind"],
         "section"
     );
 }
@@ -676,7 +848,7 @@ fn a_versioned_connector_owns_its_batches_across_review_rounds() {
             )
             .unwrap();
     }
-    let mut viewer = Viewer::start(root, &[]);
+    let mut viewer = Viewer::start(root, "openspec", "openspec", false);
     assert_eq!(viewer.review, "legacy-review");
     let docs = viewer.get("/api/documents");
     let id = doc_id(&docs, path);
@@ -699,8 +871,6 @@ fn a_versioned_connector_owns_its_batches_across_review_rounds() {
                 "--protocol",
                 "1",
                 "attach",
-                "--source",
-                "openspec",
                 "--kind",
                 "test-harness",
                 "--destination",
@@ -711,8 +881,7 @@ fn a_versioned_connector_owns_its_batches_across_review_rounds() {
             success,
         )
     };
-    let binding: Value =
-        serde_json::from_str(&attach(&root.join("openspec/specs"), "test-chat", true)).unwrap();
+    let binding: Value = serde_json::from_str(&attach(root, "test-chat", true)).unwrap();
     assert_eq!(binding["protocol_version"], 1);
     assert_eq!(binding["review_id"], viewer.review);
     assert_eq!(
@@ -754,18 +923,53 @@ fn a_versioned_connector_owns_its_batches_across_review_rounds() {
         ))
         .unwrap()
     };
+    let record = |incoming: &Value, lease: &str, receipt: &str, success| {
+        command(
+            root,
+            &[
+                "connector",
+                "delivered",
+                string(&incoming["batch_id"]),
+                "--connection",
+                connection,
+                "--lease",
+                lease,
+                "--receipt",
+                receipt,
+            ],
+            success,
+        )
+    };
     assert_eq!(viewer.board()["review"]["connector"], "Test Harness");
     assert!(!viewer.board().to_string().contains("test-chat"));
+    let adopted = connector_poll("0");
+    assert_eq!(adopted["batch_id"], manual["batch_id"]);
+    let adopted_id = string(&adopted["batch_id"]);
+    record(&adopted, string(&adopted["lease"]), "adopted-message", true);
+    write(root, "adopted-reply.md", "Handled adopted feedback.\n");
+    command(
+        root,
+        &[
+            "connector",
+            "respond",
+            adopted_id,
+            "--connection",
+            connection,
+            "--reply-id",
+            "adopted-agent-message",
+            "--body-file",
+            "adopted-reply.md",
+        ],
+        true,
+    );
+    assert_eq!(viewer.board()["comments"][0]["delivery"], "replied");
     assert_eq!(connector_poll("0")["event"], "idle");
     let first = add_and_submit("Clarify the first revision.", false);
-    assert_eq!(listen(root, &viewer.review)["batch_id"], manual["batch_id"]);
-    assert_eq!(listen(root, &viewer.review)["event"], "idle_timeout");
     let first_attempt = connector_poll("0");
     assert_eq!(first_attempt["batch_id"], first["batch_id"]);
     assert_eq!(first_attempt["session_ended"], false);
     let first_id = string(&first_attempt["batch_id"]);
     let expired_lease = string(&first_attempt["lease"]);
-    command(root, &["ack", first_id, "--lease", expired_lease], false);
     command(
         root,
         &[
@@ -800,23 +1004,6 @@ fn a_versioned_connector_owns_its_batches_across_review_rounds() {
     assert_eq!(retry["attempt"], 2);
     assert_eq!(retry["items"], first_attempt["items"]);
 
-    let record = |incoming: &Value, lease: &str, receipt: &str, success| {
-        command(
-            root,
-            &[
-                "connector",
-                "delivered",
-                string(&incoming["batch_id"]),
-                "--connection",
-                connection,
-                "--lease",
-                lease,
-                "--receipt",
-                receipt,
-            ],
-            success,
-        )
-    };
     record(&retry, expired_lease, "first-message", false);
     let lease = string(&retry["lease"]);
     record(&retry, lease, "first-message", true);
@@ -854,11 +1041,11 @@ fn a_versioned_connector_owns_its_batches_across_review_rounds() {
         true,
     );
     assert_eq!(
-        viewer.board()["replies"][0]["body"],
+        viewer.board()["replies"][1]["body"],
         "Updated the first revision.\n"
     );
     assert_eq!(
-        viewer.board()["replies"][0]["comment_ids"][0],
+        viewer.board()["replies"][1]["comment_ids"][0],
         first_attempt["items"][0]["comment_id"]
     );
     assert_eq!(viewer.board()["comments"][1]["delivery"], "replied");
@@ -905,7 +1092,7 @@ fn a_versioned_connector_owns_its_batches_across_review_rounds() {
         true,
     );
     assert_eq!(connector_poll("0")["event"], "ended");
-    assert_eq!(viewer.board()["replies"].as_array().unwrap().len(), 2);
+    assert_eq!(viewer.board()["replies"].as_array().unwrap().len(), 3);
     assert_eq!(viewer.board()["comments"][1]["delivery"], "replied");
     assert_eq!(viewer.board()["comments"][1]["resolved"], false);
     viewer.post(&viewer.api("/new"), 409, json!({}));

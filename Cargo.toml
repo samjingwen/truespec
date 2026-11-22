@@ -13,7 +13,7 @@ publish = false
 anyhow = "1"
 axum = "0.8"
 clap = { version = "4", features = ["derive"] }
-humantime = "2"
+dialoguer = "0.12"
 percent-encoding = "2"
 pulldown-cmark = "0.13"
 rusqlite = { version = "0.38", features = ["bundled"] }
