@@ -5,26 +5,25 @@ Let reviewers browse the Markdown their project already uses, without copying do
 
 ## Requirements
 
-### Requirement: Local reader startup
+### Requirement: Initialized reader startup
 
-`truespec serve` SHALL start a loopback-only reader without requiring a TrueSpec configuration file, Node.js, OpenSpec, or Lavish at runtime.
-It SHALL accept an explicit workspace root and a document source selection.
+An installed integration SHALL start the loopback reader from the initialized project's versioned source configuration.
+The reader SHALL NOT require Node.js, OpenSpec, or the selected coding harness after the integration starts it.
 
-#### Scenario: Discover OpenSpec from a nested directory
+#### Scenario: Open an initialized OpenSpec review
 
-- **WHEN** the reviewer runs `truespec serve` from a subdirectory of a workspace containing `openspec/`
-- **THEN** the command prints a local browser URL and displays the workspace's OpenSpec documents
+- **WHEN** a user invokes a selected integration in a project configured with the OpenSpec adapter
+- **THEN** TrueSpec starts or reuses the loopback reader and displays that source path's OpenSpec documents
 
-#### Scenario: Review a plain Markdown folder
+#### Scenario: Open an initialized Markdown review
 
-- **WHEN** the reviewer starts the viewer with `--source markdown` and points it at a folder of Markdown files without OpenSpec
-- **THEN** the same document reader and annotation controls are available
+- **WHEN** a user invokes a selected integration in a project configured with the Markdown adapter
+- **THEN** the same reader and annotation controls display Markdown under the configured source path
 
-#### Scenario: Reset local review state for testing
+#### Scenario: Invoke TrueSpec before initialization
 
-- **WHEN** the reviewer starts the viewer with `--reset-state`
-- **THEN** TrueSpec prints and removes only that workspace's real `truespec/.state/` directory before creating a fresh database
-- **AND** source Markdown and `truespec/config/` remain unchanged
+- **WHEN** an integration tries to start a review in a repository without valid TrueSpec project configuration
+- **THEN** it does not start the reader and tells the user to run `truespec init` from the repository root
 
 ### Requirement: OpenSpec document groups
 

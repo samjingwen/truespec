@@ -8,37 +8,36 @@ Define the versioned local contract that coding-harness integrations use to pair
 ### Requirement: Keep connectors independent from document sources
 
 TrueSpec SHALL expose coding-harness delivery through a local connector protocol without requiring provider code or credentials in the browser or review core.
-The selected document source SHALL control only document discovery and validation.
-Manual inbox delivery SHALL remain available when no connector is paired.
+The initialized source adapter SHALL control only document discovery and validation.
 
 #### Scenario: Pair a connector with an OpenSpec review
 
-- **WHEN** a connector attaches one coding conversation and selects the OpenSpec document source
-- **THEN** the destination identifies the conversation while the source independently identifies the documents
+- **WHEN** a connector attaches to a repository initialized with either the OpenSpec or Markdown adapter
+- **THEN** the destination identifies the conversation while project configuration independently identifies the documents
 - **AND** changing connector implementations does not change document discovery behavior
 
 ### Requirement: Version and isolate connector attachment
 
 Every connector operation SHALL require a supported protocol version.
-Attaching SHALL accept an opaque stable destination, a connector kind, a display label, and a document source.
+Attaching SHALL accept an opaque stable destination, connector kind, and display label, then resolve the initialized project source.
 It SHALL return the protocol version, canonical workspace, connection ID, and review ID.
-An unsupported version SHALL fail without changing review state.
+An unsupported version or invalid project configuration SHALL fail without changing review state.
 
 #### Scenario: Reattach the same destination
 
-- **WHEN** the same destination attaches again while its workspace review is open
+- **WHEN** the same destination attaches again while its repository review is open
 - **THEN** TrueSpec reuses the existing connection and review
 
 #### Scenario: Another destination tries to attach
 
-- **WHEN** a different destination tries to attach while the workspace review is open
+- **WHEN** a different destination tries to attach while the repository review is open
 - **THEN** TrueSpec rejects the attachment without redirecting existing or pending work
 
 #### Scenario: Pair after manual submission
 
-- **WHEN** feedback was submitted before a connector attached
-- **THEN** those batches remain in the manual inbox
-- **AND** only later paired batches belong to the connector
+- **WHEN** the first initialized integration attaches to an existing open review with incomplete connector-free batches
+- **THEN** TrueSpec assigns their outstanding items to that connection in submission order
+- **AND** it preserves immutable snapshots and completed items while clearing obsolete manual leases
 
 ### Requirement: Keep browser identity separate from connector identity
 
@@ -57,7 +56,7 @@ An old browser tab SHALL remain on its original review after a later review begi
 Connector retrieval SHALL return a versioned envelope with a `batch`, `idle`, or `ended` event.
 A batch event SHALL include the batch ID, lease token, lease expiry, attempt number, session-ended state, and immutable comment snapshots.
 TrueSpec SHALL deliver connector batches in submission order to their paired connection.
-A connector lease SHALL prevent another connector and the manual inbox from claiming the same batch.
+A connector lease SHALL prevent another connection from claiming the same batch.
 
 #### Scenario: Claim the next paired batch
 

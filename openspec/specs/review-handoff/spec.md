@@ -7,14 +7,14 @@ Let a reviewer send source-aware feedback as a durable batch and continue the di
 
 ### Requirement: Submit durable feedback snapshots
 
-TrueSpec SHALL commit a batch before reporting successful submission, even when no agent is connected.
+TrueSpec SHALL commit a batch before reporting successful submission, even when its configured integration is temporarily unavailable.
 Each item SHALL carry stable identifiers, the submitted comment, the real source locator, the original anchor evidence, and the source revision and anchor status at submission.
 Later edits SHALL NOT rewrite submitted evidence.
 
 #### Scenario: Submit cross-document feedback with no agent connected
 
-- **WHEN** the reviewer sends drafts from two documents while no agent is polling
-- **THEN** TrueSpec shows the batch as queued, and the agent can retrieve both items with their original context later
+- **WHEN** the reviewer sends drafts from two documents while the configured integration cannot receive them
+- **THEN** TrueSpec shows the batch as queued, and the paired integration can retrieve both items with their original context later
 
 #### Scenario: A draft has become stale
 
@@ -44,40 +44,42 @@ Ending SHALL NOT terminate the agent or silently discard drafts.
 - **WHEN** the reviewer chooses **Send and End** with no pending drafts
 - **THEN** the session ends without creating a batch
 
-### Requirement: Reliable agent delivery
+### Requirement: Pair an initialized coding conversation
 
-The agent CLI SHALL support long-running retrieval of pending feedback, explicit receipt acknowledgement, partial item completion, and one final mirrored response per manual batch.
-Uncompleted work SHALL remain retrievable after an interrupted attempt.
-Completed items SHALL NOT be sent again as work, and expired attempts SHALL NOT change recorded results.
+A selected integration SHALL pair one existing coding conversation with the repository's open review using initialized project configuration.
+Pairing SHALL NOT launch an arbitrary agent or redirect an open review to another conversation.
 
-#### Scenario: Agent stops after handling one item
+#### Scenario: Start an initialized OpenCode review
 
-- **WHEN** a leased batch expires after the agent acknowledges it and records only one item complete
-- **THEN** the next retrieval leases the remaining items without duplicating the completed item
+- **WHEN** the user runs `/truespec-review` in an initialized repository with the OpenCode integration installed
+- **THEN** the plugin starts or reuses the configured TrueSpec reader and pairs it with that exact chat and worktree
 
-#### Scenario: Receive work after the viewer stops
+#### Scenario: Reopen from the paired conversation
 
-- **WHEN** the reviewer submits a batch and stops the viewer before a manual agent receives it
-- **THEN** an agent can still retrieve and complete the batch with the local CLI
+- **WHEN** the user runs the integration command again in the paired conversation while its review is open
+- **THEN** the same browser review opens and no new coding conversation starts
 
-#### Scenario: Listen without repeated short polls
+#### Scenario: Another integration requests the open review
 
-- **WHEN** a manual agent runs `truespec listen` with the default inactivity timeout
-- **THEN** it waits for feedback or review end for up to 30 minutes without requiring another command
-- **AND** it exits with `idle_timeout` after 30 minutes without agent-relevant activity
+- **WHEN** another integration or conversation tries to pair with the same repository while its review is open
+- **THEN** TrueSpec rejects the pairing and preserves the existing destination and queued feedback
 
-#### Scenario: Mirror a manual agent response
+### Requirement: Deliver feedback through the bundled skill
 
-- **WHEN** an acknowledged manual batch is handled and the agent runs `truespec reply`
-- **THEN** one idempotent Markdown reply is appended to the chronological feed and all batch items are marked handled
-- **AND** reviewer resolution remains unchanged
+Each selected integration SHALL install the portable `truespec-review` skill and invoke it for delivered TrueSpec batches.
+The integration SHALL keep transport, receipt, retry, and response mirroring outside the skill.
 
-#### Scenario: Prompt an agent that is not polling
+#### Scenario: Deliver one review batch
 
-- **WHEN** an unpaired review has no agent listening for feedback
-- **THEN** the viewer shows a collapsed disclosure containing a copyable prompt that identifies the review and asks the coding agent to run the listen, acknowledge, process, and reply loop
-- **AND** the disclosure preserves its expanded state across document and review refreshes
-- **AND** the viewer does not expose a raw short-polling command as the primary handoff
+- **WHEN** the connector leases a batch for its paired conversation
+- **THEN** it queues a concise message that invokes `truespec-review` and includes the immutable batch and comment data
+- **AND** it does not repeat the reusable interpretation and workflow instructions in that message
+
+#### Scenario: Handle source-aware feedback
+
+- **WHEN** the agent loads `truespec-review` for a delivered batch
+- **THEN** the skill directs it to treat quotes as context, inspect current source, answer questions without unnecessary edits, apply explicit change requests, and clarify ambiguous intent
+- **AND** the agent reports its final response in the paired conversation for automatic mirroring
 
 ### Requirement: Distinguish delivery from reviewer resolution
 
@@ -106,41 +108,6 @@ The connector guidance SHALL NOT instruct an agent to edit Markdown merely becau
 
 - **WHEN** feedback could reasonably be interpreted as either a question or a change request
 - **THEN** the agent asks for clarification before editing the source
-
-### Requirement: Pair an existing coding conversation
-
-An optional connector SHALL pair a review with one existing coding conversation using a versioned local contract.
-The OpenCode connector SHALL provide `/truespec-review` without arguments and use the invoking chat's OpenSpec workspace.
-Pairing SHALL NOT redirect previously submitted batches or require a connector for standalone use.
-
-#### Scenario: Reopen a paired review from the same conversation
-
-- **WHEN** the user runs `/truespec-review` again in the paired chat while its review is open
-- **THEN** the same review opens and no new coding conversation starts
-
-#### Scenario: Install connectors interactively
-
-- **WHEN** a user runs `truespec setup` in an interactive terminal
-- **THEN** TrueSpec lists supported coding harness connectors and their installation state for selection
-- **AND** selecting OpenCode installs or updates its plugin in OpenCode's global discovery directory with the current binary path
-- **AND** it refuses to replace a differing plugin file unless the user explicitly passes `--force`
-
-#### Scenario: Select connectors non-interactively
-
-- **WHEN** setup runs without an interactive terminal
-- **THEN** repeatable `--connector`, `--all`, and `--list` options support scripted discovery and installation
-- **AND** setup with no selection prints available connectors and the exact selection command instead of waiting for input
-
-#### Scenario: Iterate in the same review
-
-- **WHEN** the user selects **Send** in the paired review
-- **THEN** the batch goes to the same chat without interrupting its current work
-- **AND** later Markdown changes appear in the same browser review, ready for another round
-
-#### Scenario: Request a review in a different chat
-
-- **WHEN** another chat tries to pair with the same workspace while its review is open
-- **THEN** TrueSpec rejects the new pairing and does not redirect existing or pending feedback
 
 ### Requirement: Mirror one agent reply per batch
 

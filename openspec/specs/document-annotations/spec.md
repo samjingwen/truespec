@@ -116,8 +116,8 @@ Feedback queued from this box SHALL have no document path, source range, or anno
 ### Requirement: Adapter-independent document identity
 
 The same workspace file exposed by different adapters SHALL retain its annotation history.
-Missing paths SHALL be shown as missing rather than reassigned to a similarly named file.
-An explicit relink SHALL preserve document identity and leave submitted snapshots unchanged.
+Missing paths SHALL be shown as missing rather than reassigned to a similarly named or moved file.
+Submitted snapshots SHALL retain their historical document identity and source evidence.
 
 #### Scenario: Switch document adapters
 
@@ -127,7 +127,8 @@ An explicit relink SHALL preserve document identity and leave submitted snapshot
 #### Scenario: Move a reviewed file
 
 - **WHEN** a reviewed file is moved within the workspace
-- **THEN** its history still shows the original location and identifies the source as missing until the reviewer explicitly relinks it
+- **THEN** its history still shows the original location and identifies the source as missing
+- **AND** TrueSpec does not attach that history to the new path automatically
 
 ### Requirement: Conservative re-anchoring
 
