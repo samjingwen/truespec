@@ -57,7 +57,7 @@ Completed items SHALL NOT be sent again as work, and expired attempts SHALL NOT 
 
 #### Scenario: Receive work after the viewer stops
 
-- **WHEN** the reviewer submits a batch and stops the viewer before an agent receives it
+- **WHEN** the reviewer submits a batch and stops the viewer before a manual agent receives it
 - **THEN** an agent can still retrieve and complete the batch with the local CLI
 
 #### Scenario: Listen without repeated short polls
@@ -74,7 +74,7 @@ Completed items SHALL NOT be sent again as work, and expired attempts SHALL NOT 
 
 #### Scenario: Prompt an agent that is not polling
 
-- **WHEN** an unpaired review has no agent polling its inbox
+- **WHEN** an unpaired review has no agent listening for feedback
 - **THEN** the viewer shows a collapsed disclosure containing a copyable prompt that identifies the review and asks the coding agent to run the listen, acknowledge, process, and reply loop
 - **AND** the disclosure preserves its expanded state across document and review refreshes
 - **AND** the viewer does not expose a raw short-polling command as the primary handoff
