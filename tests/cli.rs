@@ -445,7 +445,7 @@ fn a_waiting_agent_exits_when_a_browser_review_ends_without_feedback() {
     let root = fixture.path();
     write(root, "guide.md", "# Guide");
     let mut viewer = Viewer::start(root, &["--source", "markdown"]);
-    let polling = Command::new(CLI)
+    let listener = Command::new(CLI)
         .current_dir(root)
         .env("PATH", "")
         .args([
@@ -460,11 +460,14 @@ fn a_waiting_agent_exits_when_a_browser_review_ends_without_feedback() {
         .spawn()
         .unwrap();
     viewer.post(&viewer.api("/end"), 204, json!({ "keep_drafts": false }));
-    let output = polling.wait_with_output().unwrap();
+    let output = listener.wait_with_output().unwrap();
     assert!(output.status.success());
     let event: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(event["event"], "ended");
-    assert!(string(&event["next_step"]).contains("original agent chat"));
+    assert_eq!(
+        event["next_step"],
+        "The browser review has ended. Stop listening and continue in the original agent chat."
+    );
     viewer.stop();
 }
 

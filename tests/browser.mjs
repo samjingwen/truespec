@@ -233,7 +233,9 @@ async function exercise(mode, width) {
       check(await page.eval(() => {
         const prompt = document.querySelector("#agent-prompt").textContent;
         const help = document.querySelector("#agent-help");
-        return help.matches("details") && !help.hidden && !help.open && prompt.includes(${JSON.stringify(viewer.review)})
+        return help.matches("details") && !help.hidden && !help.open
+          && help.querySelector("summary").textContent === "Agent not listening?"
+          && prompt.includes(${JSON.stringify(viewer.review)})
           && prompt.includes("truespec listen") && !prompt.includes("truespec poll")
           && document.querySelector("#copy-prompt").textContent === "Copy prompt";
       }), "Standalone reviews show a collapsed, copyable agent prompt instead of a CLI command");

@@ -54,7 +54,7 @@ impl Envelope {
                 "Acknowledge and handle these items. Continue discussion in your agent chat."
             }
             (Outcome::Ended, _) => {
-                "The browser review has ended. Stop polling and continue in the original agent chat."
+                "The browser review has ended. Stop listening and continue in the original agent chat."
             }
             (Outcome::Idle, _) => {
                 "No work available before the wait expired. Poll again if you are waiting for this review."

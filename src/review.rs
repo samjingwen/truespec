@@ -898,12 +898,128 @@ fn read_comment(row: &rusqlite::Row<'_>) -> rusqlite::Result<Comment> {
     })
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod tests {
+    #[cfg(unix)]
     use std::os::unix::fs::symlink;
 
     use super::*;
 
+    #[test]
+    fn migration_from_v3_preserves_replies_and_allows_manual_rows() {
+        let fixture = tempfile::tempdir().unwrap();
+        let root = fixture.path().canonicalize().unwrap();
+        fs::create_dir_all(root.join(STATE_PATH)).unwrap();
+        let path = root.join(STORE_PATH);
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .pragma_update(None, "foreign_keys", "ON")
+            .unwrap();
+        connection.execute_batch(SCHEMA).unwrap();
+        connection.execute_batch(CONNECTOR_MIGRATION).unwrap();
+        connection.execute_batch(FEED_MIGRATION).unwrap();
+        connection
+            .execute(
+                "INSERT INTO sessions (id, started_at) VALUES ('review', 1)",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO review_connectors (id, session_id, kind, destination, label)
+                 VALUES ('connection', 'review', 'test', 'chat', 'Test')",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO batches
+                 (id, session_id, request_key, request, ended, created, item_count,
+                  connector_id, connector_receipt)
+                 VALUES ('batch', 'review', 'request', '{}', 0, 2, 1,
+                         'connection', 'receipt')",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO agent_replies
+                 (id, batch_id, connector_id, body, created_at)
+                 VALUES ('reply', 'batch', 'connection', 'Preserved reply.', 3)",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO review_feed (kind, reference_id)
+                 VALUES ('agent_reply', 'reply')",
+                [],
+            )
+            .unwrap();
+        drop(connection);
+
+        let store = Store::open(&root, false).unwrap();
+        let connection = store.connect().unwrap();
+        assert_eq!(
+            connection
+                .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+                .unwrap(),
+            4
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT connector_id, body FROM agent_replies WHERE id = 'reply'",
+                    [],
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+                )
+                .unwrap(),
+            ("connection".into(), "Preserved reply.".into())
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT kind, reference_id FROM review_feed
+                     WHERE reference_id = 'reply'",
+                    [],
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+                )
+                .unwrap(),
+            ("agent_reply".into(), "reply".into())
+        );
+        let connector_required = connection
+            .prepare("PRAGMA table_info(agent_replies)")
+            .unwrap()
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(1)?, row.get::<_, i64>(3)?))
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap()
+            .into_iter()
+            .find(|(name, _)| name == "connector_id")
+            .unwrap()
+            .1;
+        assert_eq!(connector_required, 0);
+        connection
+            .execute(
+                "INSERT INTO batches
+                 (id, session_id, request_key, request, ended, created, item_count)
+                 VALUES ('manual-batch', 'review', 'manual-request', '{}', 0, 4, 1)",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO agent_replies
+                 (id, batch_id, connector_id, body, created_at)
+                 VALUES ('manual-reply', 'manual-batch', NULL, 'Manual reply.', 5)",
+                [],
+            )
+            .unwrap();
+    }
+
+    #[cfg(unix)]
     #[test]
     fn reset_refuses_a_symlinked_state_directory() {
         let fixture = tempfile::tempdir().unwrap();

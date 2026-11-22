@@ -228,7 +228,7 @@ The iterative loop is:
 1. Add comments in TrueSpec.
 2. Click **Send**.
 3. The batch appears as one queued message in the same OpenCode chat.
-4. The agent reads the current source and updates Markdown in place.
+4. The agent answers questions or applies clearly requested Markdown changes in place.
 5. The completed OpenCode response is mirrored into the chronological Review feed.
 6. TrueSpec refreshes changed Markdown in the same browser tab.
 7. Repeat until the review is complete.
@@ -260,7 +260,7 @@ For a manually configured OpenCode server with a different PATH, set the plugin'
 ## Standalone agent workflow
 
 A standalone review does not start an arbitrary coding agent.
-The Review panel includes a collapsed **Agent not polling?** prompt that can be copied into an existing agent chat.
+The Review panel includes a collapsed **Agent not listening?** prompt that can be copied into an existing agent chat.
 
 The agent-side loop is:
 
