@@ -13,6 +13,10 @@ const PANEL_KEYS = {
   documents: "truespec.sidebar.documents",
   review: "truespec.sidebar.review",
 };
+const REVIEW_WIDTH_KEY = "truespec.sidebar.review.width";
+const REVIEW_MIN_REM = 17;
+const REVIEW_MAX_REM = 38;
+const READER_MIN_REM = 22;
 const COMPOSER_GAP = 8;
 const COMPOSER_MARGIN = 10;
 const targets = new ReviewTargets(article, elements["line-outline"], elements["doc-toolbar"]);
@@ -39,6 +43,9 @@ let lastSubmit;
 let annotationEnabled = true;
 let documentsOpen = true;
 let reviewOpen = true;
+let reviewExpanded = false;
+let reviewWidthPreference = storedReviewWidth();
+let reviewDrag;
 
 class RequestError extends Error {
   constructor(message, status, code) {
@@ -62,17 +69,82 @@ function savePanel(name, value) {
   catch { /* A private browser may refuse persistence. */ }
 }
 
+function storedReviewWidth() {
+  try {
+    const value = Number(localStorage.getItem(REVIEW_WIDTH_KEY));
+    return Number.isFinite(value) && value > 0 ? value : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function saveReviewWidth(value) {
+  try {
+    if (value === undefined) localStorage.removeItem(REVIEW_WIDTH_KEY);
+    else localStorage.setItem(REVIEW_WIDTH_KEY, String(Math.round(value)));
+  } catch {
+    /* A private browser may refuse persistence. */
+  }
+}
+
+function reviewWidthBounds() {
+  const rem = Number.parseFloat(getComputedStyle(document.documentElement).fontSize) || 15;
+  const minimum = Math.round(REVIEW_MIN_REM * rem);
+  const documentsWidth = wideLayout.matches && documentsOpen && !reviewExpanded
+    ? elements["documents-panel"].getBoundingClientRect().width
+    : 0;
+  const maximum = Math.max(minimum, Math.floor(Math.min(
+    REVIEW_MAX_REM * rem,
+    innerWidth * 0.55,
+    innerWidth - documentsWidth - READER_MIN_REM * rem,
+  )));
+  return { minimum, maximum };
+}
+
+function clampReviewWidth(value) {
+  const { minimum, maximum } = reviewWidthBounds();
+  return Math.max(minimum, Math.min(value, maximum));
+}
+
+function reviewResizeEnabled() {
+  return wideLayout.matches && reviewOpen && !reviewExpanded;
+}
+
+function applyReviewWidth() {
+  const layout = elements.layout;
+  if (reviewWidthPreference === undefined) layout.style.removeProperty("--review-width");
+  else layout.style.setProperty("--review-width", `${clampReviewWidth(reviewWidthPreference)}px`);
+  const { minimum, maximum } = reviewWidthBounds();
+  const current = reviewWidthPreference === undefined
+    ? elements.review.getBoundingClientRect().width
+    : clampReviewWidth(reviewWidthPreference);
+  const resizer = elements["review-resizer"];
+  const enabled = reviewResizeEnabled();
+  resizer.hidden = !enabled;
+  resizer.tabIndex = enabled ? 0 : -1;
+  resizer.setAttribute("aria-disabled", String(!enabled));
+  resizer.setAttribute("aria-valuemin", String(Math.round(minimum)));
+  resizer.setAttribute("aria-valuemax", String(Math.round(maximum)));
+  resizer.setAttribute("aria-valuenow", String(Math.round(current)));
+  resizer.setAttribute("aria-valuetext", `${Math.round(current)} pixels`);
+}
+
 function applyPanels(focusPanel) {
   const layout = elements.layout;
   layout.dataset.documentsOpen = String(documentsOpen);
   layout.dataset.reviewOpen = String(reviewOpen);
+  layout.dataset.reviewExpanded = String(reviewExpanded);
   elements["documents-toggle"].setAttribute("aria-expanded", String(documentsOpen));
   elements["review-toggle"].setAttribute("aria-expanded", String(reviewOpen));
-  elements["documents-panel"].inert = !documentsOpen;
-  elements.review.inert = !reviewOpen;
+  elements["review-expand"].setAttribute("aria-pressed", String(reviewExpanded));
+  elements["review-expand"].setAttribute("aria-label", reviewExpanded ? "Restore Review" : "Expand Review");
+  elements["review-expand"].title = reviewExpanded ? "Restore Review" : "Expand Review";
+  elements["documents-panel"].inert = !documentsOpen || reviewExpanded;
+  elements.review.inert = !reviewOpen && !reviewExpanded;
   const overlay = !wideLayout.matches && (documentsOpen || reviewOpen);
-  reader.inert = overlay;
-  elements["sidebar-backdrop"].hidden = !overlay;
+  reader.inert = overlay || reviewExpanded;
+  elements["sidebar-backdrop"].hidden = !overlay || reviewExpanded;
+  applyReviewWidth();
   if (focusPanel) {
     focusPanelControl(focusPanel === "documents" ? "documents-close" : "review-close");
   }
@@ -92,6 +164,7 @@ function focusPanelControl(id, attempts = 8) {
 }
 
 function setPanel(name, open, { focus = false, remember = true } = {}) {
+  if (name === "review" && !open && reviewExpanded) reviewExpanded = false;
   if (!wideLayout.matches && open) {
     documentsOpen = name === "documents";
     reviewOpen = name === "review";
@@ -102,6 +175,26 @@ function setPanel(name, open, { focus = false, remember = true } = {}) {
   }
   if (remember && wideLayout.matches) savePanel(name, open);
   applyPanels(focus && open ? name : undefined);
+}
+
+function setReviewExpanded(expanded, { focus = true } = {}) {
+  if (!reviewOpen || reviewExpanded === expanded) return;
+  if (reviewDrag) finishReviewResize();
+  reviewExpanded = expanded;
+  applyPanels();
+  if (focus) requestAnimationFrame(() => elements["review-expand"].focus());
+}
+
+function resizeReviewFromPointer(event) {
+  reviewWidthPreference = clampReviewWidth(innerWidth - event.clientX);
+  applyReviewWidth();
+}
+
+function finishReviewResize(event) {
+  if (!reviewDrag || (event && event.pointerId !== reviewDrag.pointerId)) return;
+  reviewDrag = undefined;
+  elements.layout.dataset.reviewResizing = "false";
+  saveReviewWidth(reviewWidthPreference);
 }
 
 function resetPanelsForViewport() {
@@ -1066,6 +1159,42 @@ elements["documents-toggle"].addEventListener("click", () =>
   setPanel("documents", true, { focus: true }));
 elements["review-toggle"].addEventListener("click", () =>
   setPanel("review", true, { focus: true }));
+elements["review-expand"].addEventListener("click", () =>
+  setReviewExpanded(!reviewExpanded));
+elements["review-resizer"].addEventListener("pointerdown", event => {
+  if (event.button !== 0 || !reviewResizeEnabled()) return;
+  event.preventDefault();
+  reviewDrag = { pointerId: event.pointerId };
+  elements.layout.dataset.reviewResizing = "true";
+  try { elements["review-resizer"].setPointerCapture(event.pointerId); }
+  catch { /* Synthetic pointers used by tests cannot be captured. */ }
+  resizeReviewFromPointer(event);
+});
+elements["review-resizer"].addEventListener("pointermove", event => {
+  if (reviewDrag?.pointerId === event.pointerId) resizeReviewFromPointer(event);
+});
+elements["review-resizer"].addEventListener("pointerup", finishReviewResize);
+elements["review-resizer"].addEventListener("pointercancel", finishReviewResize);
+elements["review-resizer"].addEventListener("lostpointercapture", finishReviewResize);
+elements["review-resizer"].addEventListener("keydown", event => {
+  if (!reviewResizeEnabled()) return;
+  if (event.key === "Home") {
+    event.preventDefault();
+    reviewWidthPreference = undefined;
+    saveReviewWidth(undefined);
+    applyReviewWidth();
+    return;
+  }
+  if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+  event.preventDefault();
+  const step = event.shiftKey ? 48 : 16;
+  const current = reviewWidthPreference ?? elements.review.getBoundingClientRect().width;
+  reviewWidthPreference = clampReviewWidth(
+    current + (event.key === "ArrowLeft" ? step : -step),
+  );
+  saveReviewWidth(reviewWidthPreference);
+  applyReviewWidth();
+});
 elements["documents-close"].addEventListener("click", () => {
   setPanel("documents", false);
   requestAnimationFrame(() => elements["documents-toggle"].focus());
@@ -1076,7 +1205,11 @@ elements["review-close"].addEventListener("click", () => {
 });
 elements["sidebar-backdrop"].addEventListener("click", () => closeOverlay(true));
 document.addEventListener("keydown", event => {
-  if (event.key === "Escape" && !wideLayout.matches && (documentsOpen || reviewOpen)
+  if (event.key === "Escape" && reviewExpanded
+      && !confirmation.open && lineComposer.hidden && composer.hidden) {
+    event.preventDefault();
+    setReviewExpanded(false);
+  } else if (event.key === "Escape" && !wideLayout.matches && (documentsOpen || reviewOpen)
       && !confirmation.open && lineComposer.hidden && composer.hidden) {
     event.preventDefault();
     closeOverlay(true);
@@ -1158,6 +1291,7 @@ window.addEventListener("scroll", scheduleLineOutline, { passive: true, capture:
 window.addEventListener("scroll", scheduleSelectionAction, { passive: true, capture: true });
 window.addEventListener("resize", scheduleLineOutline, { passive: true });
 window.addEventListener("resize", scheduleSelectionAction, { passive: true });
+window.addEventListener("resize", applyReviewWidth, { passive: true });
 window.visualViewport?.addEventListener("resize", scheduleLineOutline, { passive: true });
 window.visualViewport?.addEventListener("resize", scheduleSelectionAction, { passive: true });
 window.visualViewport?.addEventListener("scroll", scheduleLineOutline, { passive: true });

@@ -236,6 +236,149 @@ async function exercise(mode, width) {
           && document.activeElement.id === "documents-toggle"), "Escape closes the drawer and restores focus");
       `}
       await showPanel("review");
+      const reviewBeforeExpand = await page.eval(() => {
+        const review = document.querySelector("#review").getBoundingClientRect();
+        return {
+          left: review.left,
+          right: review.right,
+          width: review.width,
+          documentsOpen: document.querySelector("#layout").dataset.documentsOpen,
+          reviewOpen: document.querySelector("#layout").dataset.reviewOpen,
+        };
+      });
+      check(await page.eval(() => document.querySelector("#review-expand").nextElementSibling.id === "review-heading"
+        && document.querySelector("#review-expand").getAttribute("aria-label") === "Expand Review"
+        && document.querySelector("#review-expand").getAttribute("aria-pressed") === "false"),
+        "The accessible expand control sits immediately before Review");
+      await page.click("#review-expand");
+      await page.wait("#layout[data-review-expanded='true']");
+      const expandedReviewState = await page.eval(() => {
+        const review = document.querySelector("#review").getBoundingClientRect();
+        return {
+          label: document.querySelector("#review-expand").getAttribute("aria-label"),
+          pressed: document.querySelector("#review-expand").getAttribute("aria-pressed"),
+          documentsInert: document.querySelector("#documents-panel").inert,
+          readerInert: document.querySelector("#reader").inert,
+          backdropHidden: document.querySelector("#sidebar-backdrop").hidden,
+          left: review.left,
+          right: review.right,
+          viewport: innerWidth,
+        };
+      });
+      check(expandedReviewState.label === "Restore Review"
+        && expandedReviewState.pressed === "true"
+        && expandedReviewState.documentsInert
+        && expandedReviewState.readerInert
+        && expandedReviewState.backdropHidden
+        && expandedReviewState.left <= 1
+        && expandedReviewState.right >= expandedReviewState.viewport - 1,
+        "Expanded Review fills the workspace and removes neighboring surfaces from interaction: "
+          + JSON.stringify(expandedReviewState));
+      await page.press("Escape");
+      await page.wait("#layout[data-review-expanded='false']");
+      check(await page.eval(() => document.activeElement.id === "review-expand"
+        && document.querySelector("#review-expand").getAttribute("aria-label") === "Expand Review"
+        && !document.querySelector("#review").inert), "Escape restores Review and returns focus to its control");
+      const reviewAfterRestore = await page.eval(() => {
+        const review = document.querySelector("#review").getBoundingClientRect();
+        return {
+          left: review.left,
+          right: review.right,
+          width: review.width,
+          documentsOpen: document.querySelector("#layout").dataset.documentsOpen,
+          reviewOpen: document.querySelector("#layout").dataset.reviewOpen,
+        };
+      });
+      check(Math.abs(reviewAfterRestore.left - reviewBeforeExpand.left) <= 1
+        && Math.abs(reviewAfterRestore.right - reviewBeforeExpand.right) <= 1
+        && Math.abs(reviewAfterRestore.width - reviewBeforeExpand.width) <= 1
+        && reviewAfterRestore.documentsOpen === reviewBeforeExpand.documentsOpen
+        && reviewAfterRestore.reviewOpen === reviewBeforeExpand.reviewOpen,
+        "Restoring Review returns the exact prior panel geometry: "
+          + JSON.stringify({ reviewBeforeExpand, reviewAfterRestore }));
+      ${width >= 960 ? `
+        check(await page.eval(() => {
+          const handle = document.querySelector("#review-resizer");
+          const minimum = Number(handle.getAttribute("aria-valuemin"));
+          const maximum = Number(handle.getAttribute("aria-valuemax"));
+          const current = Number(handle.getAttribute("aria-valuenow"));
+          return !handle.hidden && handle.tabIndex === 0 && handle.getAttribute("role") === "separator"
+            && handle.getAttribute("aria-orientation") === "vertical"
+            && handle.getAttribute("aria-controls") === "review"
+            && minimum < current && current < maximum;
+        }), "Desktop Review exposes an enabled semantic resize separator");
+        const pointerWidthBefore = await page.eval(() => document.querySelector("#review").getBoundingClientRect().width);
+        await page.eval(() => {
+          const handle = document.querySelector("#review-resizer");
+          const left = document.querySelector("#review").getBoundingClientRect().left;
+          const event = options => new PointerEvent(options.type, {
+            bubbles: true, pointerId: 41, pointerType: "mouse", button: 0, buttons: options.buttons,
+            clientX: options.clientX, clientY: 200,
+          });
+          handle.dispatchEvent(event({ type: "pointerdown", buttons: 1, clientX: left }));
+          handle.dispatchEvent(event({ type: "pointermove", buttons: 1, clientX: left - 64 }));
+          handle.dispatchEvent(event({ type: "pointerup", buttons: 0, clientX: left - 64 }));
+        });
+        const pointerWidthAfter = await page.eval(() => document.querySelector("#review").getBoundingClientRect().width);
+        check(pointerWidthAfter >= pointerWidthBefore + 60
+          && await page.eval(() => Number(localStorage.getItem("truespec.sidebar.review.width")) > 0
+            && document.querySelector("#layout").dataset.reviewResizing === "false"),
+          "Pointer drag widens Review and persists the chosen width");
+        await page.eval(() => document.querySelector("#review-resizer").focus());
+        const keyboardWidthBefore = await page.eval(() => document.querySelector("#review").getBoundingClientRect().width);
+        await page.press("ArrowRight");
+        const keyboardWidthNarrower = await page.eval(() => document.querySelector("#review").getBoundingClientRect().width);
+        await page.press("ArrowLeft");
+        const keyboardWidthRestored = await page.eval(() => document.querySelector("#review").getBoundingClientRect().width);
+        check(keyboardWidthNarrower <= keyboardWidthBefore - 15
+          && Math.abs(keyboardWidthRestored - keyboardWidthBefore) <= 1,
+          "Keyboard arrows resize Review in the expected direction");
+        await page.eval(() => {
+          const handle = document.querySelector("#review-resizer");
+          const event = options => new PointerEvent(options.type, {
+            bubbles: true, pointerId: 42, pointerType: "mouse", button: 0, buttons: options.buttons,
+            clientX: options.clientX, clientY: 200,
+          });
+          const left = document.querySelector("#review").getBoundingClientRect().left;
+          handle.dispatchEvent(event({ type: "pointerdown", buttons: 1, clientX: left }));
+          handle.dispatchEvent(event({ type: "pointermove", buttons: 1, clientX: 0 }));
+          handle.dispatchEvent(event({ type: "pointerup", buttons: 0, clientX: 0 }));
+          window.__savedReviewWidth = Number(localStorage.getItem("truespec.sidebar.review.width"));
+        });
+        const reviewUrl = await page.eval(() => location.href);
+        await page.open(reviewUrl);
+        await page.wait("#article:not([hidden]) #login");
+        await showPanel("review");
+        const persistedReviewWidth = await page.eval(() => ({
+          applied: document.querySelector("#review").getBoundingClientRect().width,
+          stored: Number(localStorage.getItem("truespec.sidebar.review.width")),
+        }));
+        check(persistedReviewWidth.stored > 0
+          && Math.abs(persistedReviewWidth.applied - persistedReviewWidth.stored) <= 1,
+          "The desktop Review width persists across reloads: " + JSON.stringify(persistedReviewWidth));
+        await page.eval(() => document.querySelector("#review-resizer").focus());
+        await page.press("Home");
+        check(await page.eval(() => localStorage.getItem("truespec.sidebar.review.width") === null
+          && Number(document.querySelector("#review-resizer").getAttribute("aria-valuenow"))
+            === Math.round(document.querySelector("#review").getBoundingClientRect().width)),
+          "Home resets Review to its responsive default and clears the saved preference");
+        await page.eval(() => {
+          const handle = document.querySelector("#review-resizer");
+          const event = options => new PointerEvent(options.type, {
+            bubbles: true, pointerId: 43, pointerType: "mouse", button: 0, buttons: options.buttons,
+            clientX: options.clientX, clientY: 200,
+          });
+          const left = document.querySelector("#review").getBoundingClientRect().left;
+          handle.dispatchEvent(event({ type: "pointerdown", buttons: 1, clientX: left }));
+          handle.dispatchEvent(event({ type: "pointermove", buttons: 1, clientX: 0 }));
+          handle.dispatchEvent(event({ type: "pointerup", buttons: 0, clientX: 0 }));
+          window.__savedReviewWidth = Number(localStorage.getItem("truespec.sidebar.review.width"));
+        });
+      ` : `
+        check(await page.eval(() => document.querySelector("#review-resizer").hidden
+          && document.querySelector("#review-resizer").tabIndex === -1),
+          "The resize separator is unavailable in a narrow drawer");
+      `}
       check(await page.eval(() => !document.querySelector("#workspace") && !document.querySelector("#source")),
         "The header shows only the TrueSpec brand");
       check(await page.eval(() => !document.querySelector(".app-header button")
@@ -308,6 +451,33 @@ async function exercise(mode, width) {
       check(await page.eval(() => document.querySelector("#shortcut-count").textContent === "0"), "Typing a newline must not queue the draft");
     `);
     if (screenshots) chrome(["screenshot", join(screenshots, `truespec-${mode}-line.png`)]);
+    if (width >= 960) {
+      chrome(["resize", "1024", "880"]);
+      script(`
+        await page.wait(60);
+        const clampedReview = await page.eval(() => {
+          const handle = document.querySelector("#review-resizer");
+          return {
+            applied: document.querySelector("#review").getBoundingClientRect().width,
+            stored: window.__savedReviewWidth,
+            maximum: Number(handle.getAttribute("aria-valuemax")),
+            reader: document.querySelector("#reader").getBoundingClientRect().width,
+          };
+        });
+        check(clampedReview.applied <= clampedReview.maximum + 1
+          && clampedReview.applied < clampedReview.stored
+          && clampedReview.reader >= 320,
+          "A narrower viewport clamps Review without discarding its saved preference: "
+            + JSON.stringify(clampedReview));
+      `);
+      chrome(["resize", String(width), "880"]);
+      script(`
+        await page.wait(60);
+        check(await page.eval(() => Math.abs(
+          document.querySelector("#review").getBoundingClientRect().width - window.__savedReviewWidth
+        ) <= 1), "Review returns to its saved width when space becomes available");
+      `);
+    }
 
     await writeFile(join(root, first), `A new preamble from an external edit.\n\n${source}`);
     script(`
@@ -497,12 +667,20 @@ async function exercise(mode, width) {
     `);
     if (screenshots) chrome(["screenshot", join(screenshots, `truespec-${mode}-drafts.png`)]);
 
+    script(`
+      await showPanel("review");
+      await page.click("#review-expand");
+      await page.wait("#layout[data-review-expanded='true']");
+    `);
     const previous = viewer.review;
     await stop(viewer);
     viewer = await start(root, mode);
     assert.equal(viewer.review, previous);
     script(`
       await page.open(${JSON.stringify(viewer.url)});
+      await page.wait("#layout[data-review-expanded='false']");
+      check(await page.eval(() => document.querySelector("#review-expand").getAttribute("aria-pressed") === "false"),
+        "Expanded Review is temporary across reloads");
       await showPanel("review");
       await page.wait("#review-list > .annotation:nth-child(6)");
       check(await page.eval(() => document.querySelector("#shortcut-count").textContent === "6"), "Drafts persist after restarting");

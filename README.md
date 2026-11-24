@@ -39,7 +39,7 @@ It reads OpenSpec artifacts in place and adds a review and agent-handoff layer a
 - **OpenCode integration:** `/truespec-review` pairs the current chat and worktree with one browser review.
 - **Agent reply mirror:** one completed harness response is appended to the browser feed for each batch.
 - **Harness-independent connector protocol:** future coding harnesses can use the same local delivery contract.
-- **Responsive UI:** independent desktop panels become light-dismiss drawers on smaller screens.
+- **Responsive workspace:** collapse either desktop panel, resize Review to a persistent width, expand it for focused feedback, and use light-dismiss drawers on smaller screens.
 - **Single binary:** the web interface and SQLite are embedded in the Rust executable.
 
 ## How it works
