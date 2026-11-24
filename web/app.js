@@ -761,8 +761,9 @@ function renderReview() {
 function controls() {
   const readonly = !board || board.review.ended;
   const count = board?.comments.filter(item => !item.batch_id).length ?? 0;
+  const pendingGeneral = !!generalComment.value.trim();
   const writing = !!(composing || anchoredDraft);
-  elements.send.disabled = readonly || busy || writing || !count;
+  elements.send.disabled = readonly || busy || writing || !(count || pendingGeneral);
   elements["send-end"].disabled = readonly || busy || writing;
   elements["annotation-toggle"].hidden = readonly;
   elements["annotation-toggle"].disabled = readonly || busy || writing;
@@ -1052,16 +1053,32 @@ async function changeItem(item, operation, extra = {}) {
 async function sendDrafts(end) {
   await action(async () => {
     const drafts = board.comments.filter(item => !item.batch_id).map(item => ({ id: item.id, version: item.version }));
-    if (!drafts.length) {
+    const generalBody = generalComment.value.trim() || null;
+    if (!drafts.length && !generalBody) {
       if (!end) return;
       await request(`${workspacePath()}/end`, { keep_drafts: false });
       await updateBoard();
       focusEnded();
       return;
     }
-    const signature = JSON.stringify([reviewId, end, drafts]);
-    if (lastSubmit?.signature !== signature) lastSubmit = { signature, key: crypto.randomUUID(), drafts, end, confirmation: null };
-    const payload = { key: lastSubmit.key, drafts, end, confirmation: lastSubmit.confirmation };
+    const signature = JSON.stringify([reviewId, end, drafts, generalBody]);
+    if (lastSubmit?.signature !== signature) {
+      lastSubmit = {
+        signature,
+        key: crypto.randomUUID(),
+        drafts,
+        generalBody,
+        end,
+        confirmation: null,
+      };
+    }
+    const payload = {
+      key: lastSubmit.key,
+      drafts,
+      general_body: lastSubmit.generalBody,
+      end,
+      confirmation: lastSubmit.confirmation,
+    };
     let result;
     try {
       result = await request(`${workspacePath()}/submit`, payload);
@@ -1074,6 +1091,7 @@ async function sendDrafts(end) {
       result = await request(`${workspacePath()}/submit`, payload);
     }
     lastSubmit = undefined;
+    if (generalBody) generalComment.value = "";
     await updateBoard();
     const destination = board.review.connector || "the agent";
     textState("status", `${result.count} ${result.count === 1 ? "comment" : "comments"} queued for ${destination}.`);
@@ -1280,6 +1298,7 @@ generalComposer.addEventListener("submit", event => {
   event.preventDefault();
   void queueGeneralFeedback();
 });
+generalComment.addEventListener("input", controls);
 generalComment.addEventListener("keydown", event => {
   if (!event.isComposing && event.key === "Enter" && !event.shiftKey) {
     event.preventDefault();

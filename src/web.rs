@@ -538,7 +538,7 @@ async fn submit(
         if let Some(previous) = app.store.submitted(&review, &request)? {
             return Ok(previous);
         }
-        if request.drafts.is_empty() {
+        if request.drafts.is_empty() && request.general_body.is_none() {
             return Err(invalid("There are no drafts to send."));
         }
         let mut cache = EvidenceCache::new();

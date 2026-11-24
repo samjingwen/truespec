@@ -798,6 +798,109 @@ async function exercise(mode, width) {
   }
 }
 
+async function verifyPendingGeneralSubmission() {
+  const root = await mkdtemp(join(tmpdir(), "truespec-general-send-"));
+  let viewer;
+  try {
+    await fixture(root, "openspec");
+    viewer = await start(root, "openspec");
+    const run = (...args) => call(cli, args, { cwd: root, env: { ...process.env, PATH: "" } });
+    const binding = JSON.parse(run(
+      "connector", "attach", "--kind", "browser-test",
+      "--destination", "general-send-chat", "--label", "Browser Test",
+    ));
+    chrome(["open", viewer.url]);
+    chrome(["emulate", "--viewport", "1200x800x1"]);
+    script(`
+      await showPanel("review");
+      await page.fill("#general-comment", "Send directly.");
+      check(await page.eval(() => !document.querySelector("#send").disabled
+        && document.querySelector("#shortcut-count").textContent === "0"),
+        "Typed general feedback enables Send without Enter");
+      await page.click("#send");
+      await page.wait("#review-list > .annotation");
+      check(await page.eval(() => document.querySelector("#general-comment").value === ""
+        && document.querySelector("#review-list > .annotation p").textContent === "Send directly."
+        && document.querySelector("#review-list > .annotation").classList.contains("draft") === false),
+        "Send submits pending general feedback directly and clears only after success");
+    `);
+    const first = JSON.parse(run(
+      "connector", "poll", "--connection", binding.connection_id, "--wait", "0",
+    ));
+    assert.equal(first.items.length, 1);
+    assert.equal(first.items[0].body, "Send directly.");
+    assert.equal(first.items[0].original.original.kind, "general");
+    run(
+      "connector", "delivered", first.batch_id, "--connection", binding.connection_id,
+      "--lease", first.lease, "--receipt", "direct-general-message",
+    );
+    await writeFile(join(root, "direct-general-reply.md"), "Handled direct general feedback.\n");
+    run(
+      "connector", "respond", first.batch_id, "--connection", binding.connection_id,
+      "--reply-id", "direct-general-reply", "--body-file", "direct-general-reply.md",
+    );
+
+    script(`
+      await page.fill("#general-comment", "Queued first.");
+      await page.press("Enter");
+      await page.wait("#review-list > .annotation:nth-child(2)");
+      await page.fill("#general-comment", "apply");
+      check(await page.eval(() => !document.querySelector("#send").disabled
+        && !document.querySelector("#send-end").disabled),
+        "Pending final text remains sendable alongside a queued draft");
+      await page.eval(() => {
+        const nativeFetch = window.fetch.bind(window);
+        window.__nativeFetch = nativeFetch;
+        window.__failedSubmitBeforeNetwork = false;
+        window.fetch = async (...args) => {
+          if (String(args[0]).endsWith("/submit")) {
+            window.__lastSubmitArgs = args;
+          }
+          if (!window.__failedSubmitBeforeNetwork && String(args[0]).endsWith("/submit")) {
+            window.__failedSubmitBeforeNetwork = true;
+            throw new TypeError("Simulated network failure");
+          }
+          return nativeFetch(...args);
+        };
+      });
+      await page.click("#send-end");
+      await page.wait("#error:not([hidden])");
+      check(await page.eval(() => document.querySelector("#general-comment").value === "apply"
+        && !document.querySelector("#send-end").disabled),
+        "A failed submit preserves final general feedback for retry");
+      await page.click("#send-end");
+      await page.wait("#ended:not([hidden])");
+      check(await page.eval(() => document.querySelector("#general-comment").value === ""
+        && [...document.querySelectorAll("#review-list > .annotation p")]
+          .filter(item => item.textContent === "apply").length === 1),
+        "Retry submits final general feedback exactly once");
+      check(await page.eval(async () => {
+        const response = await window.__nativeFetch(...window.__lastSubmitArgs);
+        return response.status === 200;
+      }), "Repeating the exact successful submission replays idempotently");
+      await page.wait(50);
+      check(await page.eval(() => [...document.querySelectorAll("#review-list > .annotation p")]
+        .filter(item => item.textContent === "apply").length === 1),
+        "Idempotent replay does not duplicate final general feedback");
+    `);
+    const finalBatch = JSON.parse(run(
+      "connector", "poll", "--connection", binding.connection_id, "--wait", "0",
+    ));
+    assert.equal(finalBatch.session_ended, true);
+    assert.deepEqual(finalBatch.items.map(item => item.body), ["Queued first.", "apply"]);
+    assert.equal(finalBatch.items[1].original.original.kind, "general");
+    assert.equal(
+      (await viewerApi(viewer, `/api/reviews/${viewer.review}`)).comments
+        .filter(comment => comment.body === "apply").length,
+      1,
+    );
+    console.log("Verified direct general Send and idempotent Send and End retry.");
+  } finally {
+    await stop(viewer);
+    await rm(root, { recursive: true, force: true });
+  }
+}
+
 async function verifyMirroredReply() {
   const root = await mkdtemp(join(tmpdir(), "truespec-reply-"));
   let viewer;
@@ -885,6 +988,7 @@ async function verifyMirroredReply() {
 try {
   await exercise("openspec", 1440);
   await exercise("markdown", 390);
+  await verifyPendingGeneralSubmission();
   await verifyMirroredReply();
 } finally {
   spawnSync("chrome-devtools-axi", ["stop"], { env: chromeEnv, stdio: "ignore", timeout: 10_000 });

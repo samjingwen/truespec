@@ -148,6 +148,8 @@ pub struct Submission {
     pub drafts: Vec<DraftRef>,
     pub end: bool,
     pub confirmation: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub general_body: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -563,26 +565,9 @@ impl Store {
     }
 
     pub fn create_general_comment(&self, session: &str, body: &str) -> Result<String> {
-        validate_body(body)?;
-        let id = new_id();
-        let anchor = Anchor::general();
         self.write(|tx| {
             require_open(tx, session)?;
-            tx.execute(
-                "INSERT INTO documents (id, path) VALUES (?1, ?2) ON CONFLICT(id) DO NOTHING",
-                params![GENERAL_DOCUMENT_ID, GENERAL_DOCUMENT_PATH],
-            )?;
-            tx.execute(
-                "INSERT INTO comments (id, document_id, body, anchor) VALUES (?1, ?2, ?3, ?4)",
-                params![
-                    id,
-                    GENERAL_DOCUMENT_ID,
-                    body,
-                    serde_json::to_string(&anchor)?
-                ],
-            )?;
-            insert_feed(tx, "comment", &id)?;
-            Ok(id)
+            insert_general_comment(tx, body, None)
         })
     }
 
@@ -636,13 +621,19 @@ impl Store {
                 return Ok(submitted);
             }
             require_open(tx, session)?;
-            if items.is_empty() || items.len() != request.drafts.len() {
+            if items.len() != request.drafts.len()
+                || (items.is_empty() && request.general_body.is_none())
+            {
                 return Err(invalid("Choose at least one draft to send."));
             }
+            if let Some(body) = request.general_body.as_deref() {
+                validate_body(body)?;
+            }
+            let item_count = items.len() + usize::from(request.general_body.is_some());
             let batch_id = new_id();
             tx.execute("INSERT INTO batches (id, session_id, request_key, request, ended, created, item_count, connector_id)
                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, (SELECT id FROM review_connectors WHERE session_id = ?2))", params![
-                batch_id, session, request.key.to_string(), serde_json::to_string(request)?, request.end, now(), i64::try_from(items.len())?
+                batch_id, session, request.key.to_string(), serde_json::to_string(request)?, request.end, now(), i64::try_from(item_count)?
             ])?;
             for (ordinal, (draft, item)) in request.drafts.iter().zip(items).enumerate() {
                 ensure!(draft.id == item.comment_id, "Draft and snapshot do not match");
@@ -670,12 +661,60 @@ impl Store {
                 tx.execute("INSERT INTO batch_items (batch_id, comment_id, ordinal, snapshot) VALUES (?1, ?2, ?3, ?4)",
                     params![batch_id, item.comment_id, i64::try_from(ordinal)?, serde_json::to_string(item)?])?;
             }
+            if let Some(body) = request.general_body.as_deref() {
+                let comment_id = insert_general_comment(tx, body, Some(&batch_id))?;
+                let item = BatchItem {
+                    comment_id: comment_id.clone(),
+                    document_id: GENERAL_DOCUMENT_ID.into(),
+                    body: body.into(),
+                    original: Anchor::general(),
+                    source: SubmittedSource {
+                        path: None,
+                        revision: None,
+                        line: None,
+                        anchor_status: "attached".into(),
+                        source_range: None,
+                    },
+                };
+                tx.execute(
+                    "INSERT INTO batch_items (batch_id, comment_id, ordinal, snapshot)
+                     VALUES (?1, ?2, ?3, ?4)",
+                    params![
+                        batch_id,
+                        comment_id,
+                        i64::try_from(items.len())?,
+                        serde_json::to_string(&item)?
+                    ],
+                )?;
+            }
             if request.end {
                 end_review(tx, session)?;
             }
-            Ok(Submitted { batch_id, count: items.len(), ended: request.end })
+            Ok(Submitted { batch_id, count: item_count, ended: request.end })
         })
     }
+}
+
+fn insert_general_comment(tx: &Connection, body: &str, batch_id: Option<&str>) -> Result<String> {
+    validate_body(body)?;
+    let id = new_id();
+    tx.execute(
+        "INSERT INTO documents (id, path) VALUES (?1, ?2) ON CONFLICT(id) DO NOTHING",
+        params![GENERAL_DOCUMENT_ID, GENERAL_DOCUMENT_PATH],
+    )?;
+    tx.execute(
+        "INSERT INTO comments (id, document_id, body, anchor, batch_id)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![
+            id,
+            GENERAL_DOCUMENT_ID,
+            body,
+            serde_json::to_string(&Anchor::general())?,
+            batch_id
+        ],
+    )?;
+    insert_feed(tx, "comment", &id)?;
+    Ok(id)
 }
 
 fn registered_documents(con: &Connection) -> Result<HashMap<String, String>> {
@@ -1136,6 +1175,154 @@ mod tests {
                 )
                 .unwrap(),
             "Already handled."
+        );
+    }
+
+    #[test]
+    fn submission_atomically_includes_pending_general_feedback() {
+        let fixture = tempfile::tempdir().unwrap();
+        let root = fixture.path().canonicalize().unwrap();
+        let store = Store::open(&root, true).unwrap();
+        let first_review = store.current_session().unwrap();
+        let general_only = Submission {
+            key: Uuid::new_v4(),
+            drafts: Vec::new(),
+            end: true,
+            confirmation: None,
+            general_body: Some("apply".into()),
+        };
+        let submitted = store.submit(&first_review.id, &general_only, &[]).unwrap();
+        assert_eq!(submitted.count, 1);
+        assert!(submitted.ended);
+        assert!(store.session(&first_review.id).unwrap().ended);
+        let connection = store.connect().unwrap();
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM comments WHERE batch_id = ?1",
+                    [&submitted.batch_id],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            1
+        );
+        let snapshot: String = connection
+            .query_row(
+                "SELECT snapshot FROM batch_items WHERE batch_id = ?1 AND ordinal = 0",
+                [&submitted.batch_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let snapshot: BatchItem = serde_json::from_str(&snapshot).unwrap();
+        assert_eq!(snapshot.body, "apply");
+        assert!(snapshot.original.is_general());
+        drop(connection);
+
+        assert_eq!(
+            store.submit(&first_review.id, &general_only, &[]).unwrap(),
+            submitted
+        );
+        assert_eq!(
+            store
+                .connect()
+                .unwrap()
+                .query_row(
+                    "SELECT COUNT(*) FROM comments WHERE batch_id = ?1",
+                    [&submitted.batch_id],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            1
+        );
+
+        let second_review = store.next_session(&first_review.id).unwrap();
+        let queued_id = store
+            .create_general_comment(&second_review.id, "Queued first.")
+            .unwrap();
+        let queued_item = BatchItem {
+            comment_id: queued_id.clone(),
+            document_id: GENERAL_DOCUMENT_ID.into(),
+            body: "Queued first.".into(),
+            original: Anchor::general(),
+            source: SubmittedSource {
+                path: None,
+                revision: None,
+                line: None,
+                anchor_status: "attached".into(),
+                source_range: None,
+            },
+        };
+        let mixed = Submission {
+            key: Uuid::new_v4(),
+            drafts: vec![DraftRef {
+                id: queued_id,
+                version: 1,
+            }],
+            end: false,
+            confirmation: None,
+            general_body: Some("Typed second.".into()),
+        };
+        let mixed_result = store
+            .submit(
+                &second_review.id,
+                &mixed,
+                std::slice::from_ref(&queued_item),
+            )
+            .unwrap();
+        assert_eq!(mixed_result.count, 2);
+        let connection = store.connect().unwrap();
+        let mut statement = connection
+            .prepare("SELECT snapshot FROM batch_items WHERE batch_id = ?1 ORDER BY ordinal")
+            .unwrap();
+        let bodies: Vec<String> = statement
+            .query_map([&mixed_result.batch_id], |row| row.get::<_, String>(0))
+            .unwrap()
+            .map(|snapshot| {
+                serde_json::from_str::<BatchItem>(&snapshot.unwrap())
+                    .unwrap()
+                    .body
+            })
+            .collect();
+        assert_eq!(bodies, ["Queued first.", "Typed second."]);
+        drop(statement);
+        drop(connection);
+
+        let legacy: Submission = serde_json::from_str(&format!(
+            r#"{{"key":"{}","drafts":[],"end":false,"confirmation":null}}"#,
+            Uuid::new_v4()
+        ))
+        .unwrap();
+        assert!(legacy.general_body.is_none());
+        assert!(
+            !serde_json::to_string(&legacy)
+                .unwrap()
+                .contains("general_body")
+        );
+
+        let batches_before = store
+            .connect()
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM batches", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap();
+        let invalid = Submission {
+            key: Uuid::new_v4(),
+            drafts: Vec::new(),
+            end: true,
+            confirmation: None,
+            general_body: Some("   ".into()),
+        };
+        assert!(store.submit(&second_review.id, &invalid, &[]).is_err());
+        assert!(!store.session(&second_review.id).unwrap().ended);
+        assert_eq!(
+            store
+                .connect()
+                .unwrap()
+                .query_row("SELECT COUNT(*) FROM batches", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            batches_before
         );
     }
 

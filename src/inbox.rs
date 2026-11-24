@@ -314,6 +314,7 @@ mod tests {
                 .collect(),
             end: true,
             confirmation: None,
+            general_body: None,
         };
         request.drafts[1].version = 10;
         assert!(store.submit(&review.id, &request, &items).is_err());
