@@ -180,8 +180,8 @@ Drafts use a dashed outline and remain editable or removable.
 
 Submitted items remain in their chronological positions.
 Delivery shows a labeled spinner while the agent is waiting or working and a green check after the agent replies or records completion.
-Reviewer resolution remains a separate **Unresolved / Resolved** state.
-Agent completion never resolves a comment automatically.
+Source changes add **Outdated** or source-missing warnings independently from agent progress.
+TrueSpec retains legacy resolution data in existing local databases but does not expose reviewer-resolution controls or badges.
 
 ### 4. Review updated Markdown
 
@@ -233,7 +233,7 @@ Sending does not interrupt a running OpenCode turn.
 It queues the review batch in the session inbox.
 Ending TrueSpec does not close the OpenCode chat.
 OpenCode remains the canonical conversation; the browser reply is a read-only mirror linked to that batch.
-An agent reply shows the green done indicator, but never resolves comments automatically.
+An agent reply shows the green done indicator.
 
 ### Update an installed integration
 

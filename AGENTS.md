@@ -41,8 +41,8 @@ It serves an embedded browser UI, stores review state separately, and delivers d
 - Relocate an annotation only when its source match is reliable and unique.
 - Mark ambiguous targets `Outdated` instead of attaching them to another occurrence.
 - Keep moved-file history at its original missing path; never infer identity from matching content.
-- Keep agent delivery or completion separate from reviewer resolution.
-- Never resolve a comment automatically after an agent reply.
+- Keep agent progress and source freshness as the complete visible feedback status.
+- Preserve legacy resolution data for database compatibility, but do not expose reviewer-resolution controls or badges.
 - Bind the viewer to loopback by default.
 - Serve only discovered Markdown documents.
 - Do not execute raw HTML, scripts, or externally loaded images from reviewed Markdown.
@@ -63,7 +63,8 @@ It serves an embedded browser UI, stores review state separately, and delivers d
 - Keep reusable feedback interpretation in `skills/truespec-review/SKILL.md`, not repeated in connector messages.
 - Keep connector commands versioned and usable while the browser server is offline.
 - Treat OpenCode as one connector implementation, not as a core dependency.
-- Preserve keyboard, narrow-viewport, safe-area, and reduced-motion behavior for UI changes.
+- Preserve keyboard, narrow-viewport, and safe-area behavior for UI changes.
+- Apply normal interface motion regardless of the operating-system reduced-motion preference.
 
 ## State and migrations
 

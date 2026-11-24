@@ -8,7 +8,14 @@ import { dirname, join, resolve } from "node:path";
 import { createInterface } from "node:readline";
 
 const cli = resolve(process.env.TRUESPEC_BIN || "target/debug/truespec");
-const chromeEnv = { ...process.env, CHROME_DEVTOOLS_AXI_SESSION: `truespec-test-${process.pid}` };
+const chromeEnv = {
+  ...process.env,
+  CHROME_DEVTOOLS_AXI_SESSION: `truespec-test-${process.pid}`,
+  CHROME_DEVTOOLS_AXI_CHROME_ARGS: [
+    process.env.CHROME_DEVTOOLS_AXI_CHROME_ARGS,
+    "--force-prefers-reduced-motion",
+  ].filter(Boolean).join(" "),
+};
 const screenshots = process.env.TRUESPEC_SCREENSHOTS;
 
 function call(binary, args, options = {}) {
@@ -195,6 +202,9 @@ async function exercise(mode, width) {
     script(`
       await page.wait("#article:not([hidden]) #login");
       await page.wait("#review-heading");
+      check(await page.eval(() => matchMedia("(prefers-reduced-motion: reduce)").matches
+        && getComputedStyle(document.querySelector(".switch-track")).transitionDuration !== "0.01ms"),
+        "Normal switch motion remains enabled under reduced-motion preference");
       ${width >= 960 ? `
         await page.wait("#documents-toggle[aria-expanded='true']");
         await page.wait("#review-toggle[aria-expanded='true']");
@@ -229,6 +239,8 @@ async function exercise(mode, width) {
         await page.wait("#review-toggle[aria-expanded='false']");
         await page.click("#documents-toggle");
         await page.wait("#sidebar-backdrop:not([hidden])");
+        check(await page.eval(() => parseFloat(getComputedStyle(document.querySelector("#review")).transitionDuration) > 0.01),
+          "Normal drawer motion remains enabled under reduced-motion preference");
         check(await page.eval(() => document.querySelector("#layout").dataset.reviewOpen === "false"
           && document.querySelector("#reader").inert), "Mobile opens one overlay drawer at a time");
         await page.press("Escape");
@@ -724,7 +736,11 @@ async function exercise(mode, width) {
         "All sent items remain in the unified feed");
       check(await page.eval(() => [...document.querySelectorAll("#review-list > .annotation")].every(item => {
         const indicator = item.querySelector(".delivery-indicator.working");
-        return indicator?.getAttribute("aria-label") === "Queued for Browser Test";
+        return indicator?.getAttribute("aria-label") === "Queued for Browser Test"
+          && getComputedStyle(indicator.querySelector(".delivery-spinner")).animationName === "delivery-spin"
+          && parseFloat(getComputedStyle(indicator.querySelector(".delivery-spinner")).animationDuration) > 0
+          && !/Resolved|Unresolved/.test(item.textContent)
+          && !item.querySelector(".annotation-actions");
       })), "Display a labeled working spinner while paired delivery is pending");
     `);
     await stop(viewer);
@@ -788,8 +804,11 @@ async function exercise(mode, width) {
       await showPanel("review");
       await page.wait("#ended:not([hidden])");
       check(await page.eval(() => [...document.querySelectorAll(".annotation-status")].length === ${mode === "markdown" ? 7 : 6} &&
-        [...document.querySelectorAll(".annotation-status")].every(item => item.querySelector(".delivery-indicator.done")?.getAttribute("aria-label") === "Agent done"
-          && item.textContent.includes("Unresolved"))), "A green done icon should never resolve comments");
+        [...document.querySelectorAll(".annotation-status")].every(item =>
+          item.querySelector(".delivery-indicator.done")?.getAttribute("aria-label") === "Agent done"
+          && !/Resolved|Unresolved/.test(item.textContent))
+        && ![...document.querySelectorAll(".annotation:not(.draft) .annotation-actions")].length),
+        "Handled feedback shows only agent progress without reviewer resolution UI");
     `);
     console.log(`Verified ${mode} browser-to-agent handoff at ${width}px.`);
   } finally {
@@ -925,6 +944,12 @@ async function verifyMirroredReply() {
       drafts: [{ id: comment.id, version: 1 }],
       end: false,
     });
+    await viewerApi(
+      viewer,
+      `/api/reviews/${viewer.review}/comments/${comment.id}`,
+      { action: "resolve", resolved: true },
+      204,
+    );
 
     chrome(["open", viewer.url]);
     chrome(["emulate", "--viewport", "1200x800x1"]);
@@ -961,8 +986,9 @@ async function verifyMirroredReply() {
           && !reply.querySelector("script")
           && reply.querySelector(".reply-references summary").textContent === "Regarding 1 comment"
           && document.querySelector(".annotation-status .delivery-indicator.done")?.getAttribute("aria-label") === "Agent done"
-          && document.querySelector(".annotation-status").textContent.includes("Unresolved");
-      }), "A safe, unread agent reply is mirrored once and linked without resolving its comment");
+          && !/Resolved|Unresolved/.test(document.querySelector(".annotation-status").textContent)
+          && !document.querySelector(".annotation:not(.draft) .annotation-actions");
+      }), "A safe, unread agent reply is mirrored once with no reviewer resolution UI");
       await page.click(".reply-reference");
       await page.wait("#line-outline[data-line='1']");
     `);
@@ -974,8 +1000,19 @@ async function verifyMirroredReply() {
         return states[0].classList.contains("delivery-indicator")
           && states[1].textContent === "Outdated"
           && states[1].title === "The document changed, so this comment may point to the wrong place."
-          && states.at(-1).textContent === "Unresolved";
-      }), "Agent progress appears first, Outdated second, and reviewer resolution last");
+          && states.length === 2;
+      }), "Agent progress appears first and Outdated remains the only additional status");
+    `);
+    await rm(join(root, first));
+    script(`
+      await page.wait(2200);
+      check(await page.eval(() => {
+        const states = [...document.querySelector(".annotation-status").children];
+        return states[0].classList.contains("delivery-indicator")
+          && states[1].textContent === "Source missing"
+          && states.length === 2
+          && !document.querySelector(".annotation:not(.draft) .annotation-actions");
+      }), "Source missing remains visible without reviewer resolution UI");
     `);
     assert.equal((await viewerApi(viewer, `/api/reviews/${viewer.review}`)).replies.length, 1);
     console.log("Verified one mirrored agent reply with unread and comment linkage.");

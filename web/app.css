@@ -272,7 +272,3 @@ dialog p { color: var(--quiet); font-size: 0.89rem; }
   .prose h1 { font-size: 1.88rem; }
   .button, .text-button, .doc-link { min-height: 2rem; }
 }
-@media (prefers-reduced-motion: reduce) {
-  .navigation, .review { transition-duration: 0.01ms; }
-  .delivery-spinner { animation: none; border-right-color: currentColor; opacity: 0.65; }
-}

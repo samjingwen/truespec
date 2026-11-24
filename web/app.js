@@ -734,20 +734,12 @@ function renderReview() {
     }
     if (item.location.status === "missing") badges.append(statusBadge("Source missing", "warning"));
     if (item.location.status === "relocated") badges.append(statusBadge("Relocated", "neutral"));
-    if (item.delivery) {
-      badges.append(statusBadge(item.resolved ? "Resolved" : "Unresolved", item.resolved ? "" : "neutral"));
-    }
     if (badges.childElementCount) row.append(badges);
-    if (!readonly) {
+    if (!readonly && !item.batch_id) {
       const actions = node("div", "annotation-actions");
-      if (!item.batch_id) {
-        actions.append(
-          makeButton("Edit", "text-button", () => editComposer(item), `${item.id}:edit`),
-          makeButton("Remove", "text-button", () => void changeItem(item, "remove"), `${item.id}:remove`));
-      } else {
-        actions.append(makeButton(item.resolved ? "Reopen" : "Resolve", "text-button",
-          () => void changeItem(item, "resolve", { resolved: !item.resolved }), `${item.id}:resolve`));
-      }
+      actions.append(
+        makeButton("Edit", "text-button", () => editComposer(item), `${item.id}:edit`),
+        makeButton("Remove", "text-button", () => void changeItem(item, "remove"), `${item.id}:remove`));
       row.append(actions);
     }
     fragment.append(row);
