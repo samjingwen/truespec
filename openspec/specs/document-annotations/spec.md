@@ -76,7 +76,7 @@ An annotation SHALL retain its document identity, source location, revision, hea
 The review sidebar SHALL show one chronological feed without separate Drafts and History views.
 Each item SHALL show its document path and target quote or original heading, with the source line number for line comments.
 Reviewers SHALL be able to jump to the target and edit or remove unsent drafts.
-Submitting SHALL update an item in place with its delivery and resolution state rather than moving it elsewhere.
+Submitting SHALL update an item in place with its delivery and source-freshness state rather than moving it elsewhere.
 
 #### Scenario: Review drafts across documents after restart
 
@@ -95,6 +95,17 @@ Submitting SHALL update an item in place with its delivery and resolution state 
 - **WHEN** expanded original context makes the chronological feed taller than the Review panel
 - **THEN** the feed scrolls independently
 - **AND** the general feedback box and send controls remain reachable without growing the whole panel
+
+### Requirement: Show submitted feedback status
+
+Submitted feedback SHALL show agent progress and source-freshness warnings.
+The browser SHALL NOT expose reviewer resolution controls or resolution badges.
+
+#### Scenario: Read submitted feedback status
+
+- **WHEN** feedback has been submitted
+- **THEN** the feed shows agent progress and any source-freshness warning
+- **AND** it does not show **Resolve**, **Reopen**, **Resolved**, or **Unresolved**
 
 ### Requirement: Queue feedback without an annotation
 

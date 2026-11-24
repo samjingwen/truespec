@@ -89,17 +89,22 @@ The integration SHALL keep transport, receipt, retry, and response mirroring out
 - **THEN** the skill directs it to treat quotes as context, inspect current source, answer questions without unnecessary edits, apply explicit change requests, and clarify ambiguous intent
 - **AND** the agent reports its final response in the paired conversation for automatic mirroring
 
-### Requirement: Distinguish delivery from reviewer resolution
+### Requirement: Show agent delivery progress
 
-TrueSpec SHALL distinguish queued, received, and completed work from the reviewer's decision to resolve an annotation.
-For paired reviews, it SHALL show delivery only after the connector records that the destination accepted the batch.
-It SHALL NOT require a browser conversation to complete work or automatically resolve an annotation when the agent completes it.
+TrueSpec SHALL show whether submitted feedback is waiting for the agent or handled.
+Source-freshness warnings SHALL remain independent from agent progress.
+The browser SHALL NOT expose a separate reviewer-resolution state.
 
-#### Scenario: Continue in agent chat
+#### Scenario: Display agent working
 
-- **WHEN** the agent receives feedback for an ended browser review
-- **THEN** the CLI indicates that the agent should continue in the original chat rather than wait for more browser messages
-- **AND** the reviewer can later open a new review and resolve or reopen annotations independently of delivery status
+- **WHEN** feedback is queued, delivered, retried, or being handled
+- **THEN** the browser shows a continuously rotating spinner with an accessible state label
+
+#### Scenario: Display agent done
+
+- **WHEN** an agent reply or recorded completion handles feedback
+- **THEN** the spinner is replaced by an accessible green done icon
+- **AND** any **Outdated** or source-missing warning remains visible
 
 ### Requirement: Support questions and change requests
 
@@ -117,11 +122,10 @@ The connector guidance SHALL NOT instruct an agent to edit Markdown merely becau
 - **WHEN** feedback could reasonably be interpreted as either a question or a change request
 - **THEN** the agent asks for clarification before editing the source
 
-### Requirement: Mirror one agent reply per batch
+### Requirement: Mirror agent replies
 
-A coding-harness connector SHALL be able to append one durable Markdown reply for a delivered batch using a stable harness message ID.
+A coding-harness connector SHALL append one durable Markdown reply for a delivered batch using a stable harness message ID.
 The browser SHALL show that reply chronologically after the batch comments and link it to every comment in the batch.
-Mirroring a reply SHALL NOT resolve reviewer comments.
 
 #### Scenario: OpenCode completes a TrueSpec turn
 
@@ -139,11 +143,4 @@ Mirroring a reply SHALL NOT resolve reviewer comments.
 
 - **WHEN** a new agent reply arrives while the Review panel is closed
 - **THEN** the Review edge tab shows an unread indicator
-- **AND** opening Review clears the indicator without resolving any comment
-
-#### Scenario: Distinguish agent work from reviewer resolution
-
-- **WHEN** feedback is queued, delivered, retried, or being handled
-- **THEN** the browser shows a spinner with an accessible state label
-- **AND** an agent reply or recorded completion replaces it with a green done icon
-- **AND** **Unresolved / Resolved** remains a separate reviewer-controlled state
+- **AND** opening Review clears the indicator

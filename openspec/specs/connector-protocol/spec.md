@@ -75,7 +75,7 @@ A connector SHALL record delivery only after its destination accepts the batch.
 The receipt SHALL identify the accepted harness message or turn.
 Repeating the same receipt SHALL be idempotent.
 A different receipt or stale lease SHALL NOT replace a recorded delivery.
-A delivery receipt SHALL mean only that the destination accepted the batch, not that the agent completed it or the reviewer resolved it.
+A delivery receipt SHALL mean only that the destination accepted the batch, not that the agent completed it.
 
 #### Scenario: Retry an ambiguous receipt write
 
@@ -116,13 +116,13 @@ After a delivered harness turn completes, a connector SHALL be able to store one
 Repeating the same reply ID and body SHALL be idempotent.
 A different reply for the same batch SHALL be rejected.
 The browser SHALL append the reply once to the chronological feed and link it to every batch comment.
-Recording a reply SHALL mark the batch items handled but SHALL NOT resolve reviewer comments.
+Recording a reply SHALL mark the batch items handled.
 
 #### Scenario: Store the completed harness response
 
 - **WHEN** the connector records the completed response for a delivered batch
 - **THEN** TrueSpec appends one linked reply after that batch's comments
-- **AND** the reviewer controls resolution independently
+- **AND** the linked feedback shows the agent-done state
 
 #### Scenario: Retry response recording
 

@@ -8,7 +8,6 @@ The review sidebar SHALL show one chronological feed without separate Drafts and
 Each item SHALL show its document path and target quote or original heading, with the source line number for line comments.
 Reviewers SHALL be able to jump to the target and edit or remove unsent drafts.
 Submitting SHALL update an item in place with its delivery and source-freshness state rather than moving it elsewhere.
-Submitted items SHALL NOT expose reviewer resolution controls or resolution badges.
 
 #### Scenario: Review drafts across documents after restart
 
@@ -27,6 +26,13 @@ Submitted items SHALL NOT expose reviewer resolution controls or resolution badg
 - **WHEN** expanded original context makes the chronological feed taller than the Review panel
 - **THEN** the feed scrolls independently
 - **AND** the general feedback box and send controls remain reachable without growing the whole panel
+
+## ADDED Requirements
+
+### Requirement: Show submitted feedback status
+
+Submitted feedback SHALL show agent progress and source-freshness warnings.
+The browser SHALL NOT expose reviewer resolution controls or resolution badges.
 
 #### Scenario: Read submitted feedback status
 
