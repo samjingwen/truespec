@@ -165,6 +165,10 @@ This follows the list.
     await writeFile(join(root, "openspec/changes/revise-login/tasks.md"), "# Tasks\n");
     await mkdir(join(root, "openspec/changes/revise-login/specs/account"), { recursive: true });
     await writeFile(join(root, "openspec/changes/revise-login/specs/account/spec.md"), "# Account delta\n");
+    await mkdir(join(root, "openspec/changes/archive/older-one"), { recursive: true });
+    await mkdir(join(root, "openspec/changes/archive/older-two"), { recursive: true });
+    await writeFile(join(root, "openspec/changes/archive/older-one/proposal.md"), "# Older proposal\n");
+    await writeFile(join(root, "openspec/changes/archive/older-two/tasks.md"), "# Older tasks\n");
   }
   return { first, second, source };
 }
@@ -403,16 +407,123 @@ async function exercise(mode, width) {
         && document.querySelector("#connection").textContent === "Paired with Browser Test"),
         "Initialized reviews show their paired integration without a standalone handoff");
       ${mode === "openspec" ? `
-        check(await page.eval(() => {
-          const group = [...document.querySelectorAll(".doc-group")].find(item => item.querySelector("h2")?.textContent === "change / revise-login");
+        const disclosureDefaults = await page.eval(() => {
+          const group = [...document.querySelectorAll(".doc-group")].find(item =>
+            item.querySelector(":scope > summary .disclosure-label")?.textContent === "change / revise-login");
+          const current = [...document.querySelectorAll(".doc-group")].find(item =>
+            item.querySelector(":scope > summary .disclosure-label")?.textContent === "Current specifications");
+          const archives = [...document.querySelectorAll(".doc-group")].filter(item =>
+            item.querySelector(":scope > summary .disclosure-label")?.textContent.startsWith("archive / "));
           const regular = [...group.children].filter(item => item.matches("a.doc-link")).map(item => item.textContent);
           const folder = group.querySelector(".delta-group");
-          return JSON.stringify(regular) === JSON.stringify(["design.md", "proposal.md", "tasks.md"])
-            && folder.open && folder.querySelector("summary").textContent === "delta/"
-            && [...folder.querySelectorAll(".doc-link")].map(item => item.textContent).join("|") === "account"
-            && !group.textContent.includes("Delta:");
-        }), "Active change documents are grouped under lowercase change and delta/");
-      ` : ""}
+          return {
+            currentOpen: current?.open,
+            changeOpen: group?.open,
+            archives: archives.map(item => ({
+              label: item.querySelector(":scope > summary .disclosure-label")?.textContent,
+              open: item.open,
+            })),
+            regular,
+            deltaOpen: folder?.open,
+            deltaLabel: folder?.querySelector("summary .disclosure-label")?.textContent,
+            deltas: [...folder.querySelectorAll(".doc-link")].map(item => item.textContent),
+            hasLegacyDelta: group.textContent.includes("Delta:"),
+          };
+        });
+        check(disclosureDefaults.currentOpen && disclosureDefaults.changeOpen
+          && disclosureDefaults.archives.length
+          && disclosureDefaults.archives.every(item => !item.open)
+          && JSON.stringify(disclosureDefaults.regular) === JSON.stringify(["design.md", "proposal.md", "tasks.md"])
+          && disclosureDefaults.deltaOpen && disclosureDefaults.deltaLabel === "delta/"
+          && disclosureDefaults.deltas.join("|") === "account"
+          && !disclosureDefaults.hasLegacyDelta,
+          "Document disclosures use source-aware defaults without changing labels or ordering: "
+            + JSON.stringify(disclosureDefaults));
+        await page.eval(() => {
+          const group = [...document.querySelectorAll(".doc-group")].find(item =>
+            item.querySelector(":scope > summary .disclosure-label")?.textContent === "change / revise-login");
+          group.querySelector(":scope > summary").focus();
+        });
+        await page.press("Enter");
+        check(await page.eval(() => {
+          const group = [...document.querySelectorAll(".doc-group")].find(item =>
+            item.querySelector(":scope > summary .disclosure-label")?.textContent === "change / revise-login");
+          return !group.open && document.activeElement === group.querySelector(":scope > summary");
+        }), "Enter toggles a top-level disclosure without moving summary focus");
+        await page.press("Space");
+        check(await page.eval(() => {
+          const group = [...document.querySelectorAll(".doc-group")].find(item =>
+            item.querySelector(":scope > summary .disclosure-label")?.textContent === "change / revise-login");
+          return group.open;
+        }), "Space reopens a top-level disclosure");
+        await page.click(".doc-group .delta-group > summary");
+        await page.click(".doc-group[data-disclosure-key='group:archive / older-one'] > summary");
+        const disclosureUrl = await page.eval(() => location.href);
+        await page.open(disclosureUrl);
+        await page.wait("#article:not([hidden]) #login");
+        check(await page.eval(() => {
+          const group = [...document.querySelectorAll(".doc-group")].find(item =>
+            item.querySelector(":scope > summary .disclosure-label")?.textContent === "change / revise-login");
+          const openedArchive = document.querySelector(
+            ".doc-group[data-disclosure-key='group:archive / older-one']");
+          const otherArchives = [...document.querySelectorAll(".doc-group")].filter(item =>
+            item.dataset.disclosureKey.startsWith("group:archive / ")
+              && item !== openedArchive);
+          return group.open && !group.querySelector(".delta-group").open
+            && openedArchive.open && otherArchives.every(item => !item.open);
+        }), "Top-level and nested disclosure states persist independently after reload");
+        const deltaHref = await page.eval(() => {
+          const group = [...document.querySelectorAll(".doc-group")].find(item =>
+            item.querySelector(":scope > summary .disclosure-label")?.textContent === "change / revise-login");
+          return group.querySelector(".delta-group .doc-link").href;
+        });
+        await page.open(deltaHref);
+        await page.wait(".doc-link[aria-current='page']");
+        check(await page.eval(() => {
+          const active = document.querySelector(".doc-link[aria-current='page']");
+          return active.closest(".doc-group").open && active.closest(".delta-group").open
+            && localStorage.getItem("truespec.documents.disclosure:group:change / revise-login") === "true"
+            && localStorage.getItem("truespec.documents.disclosure:delta:change / revise-login") === "true";
+        }), "A selected delta document opens and persists every ancestor disclosure");
+        await page.eval(() => {
+          const group = [...document.querySelectorAll(".doc-group")].find(item =>
+            item.querySelector(":scope > summary .disclosure-label")?.textContent === "change / revise-login");
+          group.open = false;
+          group.dispatchEvent(new Event("toggle"));
+          const href = [...group.querySelectorAll(":scope > .doc-link")]
+            .find(link => link.textContent === "design.md").href;
+          history.pushState(null, "", href);
+          dispatchEvent(new PopStateEvent("popstate"));
+        });
+        await page.wait(".doc-link[aria-current='page']");
+        check(await page.eval(() => {
+          const active = document.querySelector(".doc-link[aria-current='page']");
+          return active.textContent === "design.md" && active.closest(".doc-group").open;
+        }), "Browser-history navigation reveals a document inside a closed group");
+        await page.open(${JSON.stringify(viewer.url)});
+        await page.wait("#article:not([hidden]) #login");
+        await page.click(".doc-group .delta-group > summary");
+      ` : `
+        await showPanel("documents");
+        check(await page.eval(() => {
+          const group = document.querySelector(".doc-group");
+          return group.matches("details") && group.open
+            && group.querySelector(":scope > summary .disclosure-label").textContent === "Documents";
+        }), "Markdown directory groups use the same open disclosure in the mobile drawer");
+        await page.eval(() => document.querySelector(".doc-group > summary").focus());
+        await page.press("Enter");
+        const mobileDisclosureState = await page.eval(() => ({
+          open: document.querySelector(".doc-group").open,
+          activeTag: document.activeElement.tagName,
+          activeText: document.activeElement.textContent,
+          focusedSummary: document.activeElement.matches(".doc-group > summary"),
+        }));
+        check(!mobileDisclosureState.open && mobileDisclosureState.focusedSummary,
+          "Native disclosure keyboard behavior works inside the mobile drawer: "
+            + JSON.stringify(mobileDisclosureState));
+        await page.press("Enter");
+        await showPanel("review");
+      `}
       check(await page.eval(() => {
         const buttons = [...document.querySelectorAll("#handoff button")];
         return buttons.map(button => button.textContent).join("|") === "Send|Send and End" && buttons[0].disabled && !buttons[1].disabled;
@@ -471,7 +582,7 @@ async function exercise(mode, width) {
           const handle = document.querySelector("#review-resizer");
           return {
             applied: document.querySelector("#review").getBoundingClientRect().width,
-            stored: window.__savedReviewWidth,
+            stored: Number(localStorage.getItem("truespec.sidebar.review.width")),
             maximum: Number(handle.getAttribute("aria-valuemax")),
             reader: document.querySelector("#reader").getBoundingClientRect().width,
           };
@@ -486,7 +597,8 @@ async function exercise(mode, width) {
       script(`
         await page.wait(60);
         check(await page.eval(() => Math.abs(
-          document.querySelector("#review").getBoundingClientRect().width - window.__savedReviewWidth
+          document.querySelector("#review").getBoundingClientRect().width
+            - Number(localStorage.getItem("truespec.sidebar.review.width"))
         ) <= 1), "Review returns to its saved width when space becomes available");
       `);
     }
@@ -494,6 +606,13 @@ async function exercise(mode, width) {
     await writeFile(join(root, first), `A new preamble from an external edit.\n\n${source}`);
     script(`
       await page.wait("#doc-notice:not([hidden])");
+      ${mode === "openspec" ? `
+        check(await page.eval(() => {
+          const group = [...document.querySelectorAll(".doc-group")].find(item =>
+            item.querySelector(":scope > summary .disclosure-label")?.textContent === "change / revise-login");
+          return group.open && !group.querySelector(".delta-group").open;
+        }), "Source refresh preserves independent disclosure state");
+      ` : ""}
       check(await page.eval(() => document.querySelector("#line-comment").value === "Define the exact timeout.\\nInclude units."), "Refresh must preserve the open composer");
       await page.press("Enter");
       await page.wait("#line-error:not([hidden])");

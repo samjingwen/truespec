@@ -13,6 +13,7 @@ const PANEL_KEYS = {
   documents: "truespec.sidebar.documents",
   review: "truespec.sidebar.review",
 };
+const DOCUMENT_DISCLOSURE_PREFIX = "truespec.documents.disclosure:";
 const REVIEW_WIDTH_KEY = "truespec.sidebar.review.width";
 const REVIEW_MIN_REM = 17;
 const REVIEW_MAX_REM = 38;
@@ -67,6 +68,35 @@ function storedPanel(name, fallback = true) {
 function savePanel(name, value) {
   try { localStorage.setItem(PANEL_KEYS[name], String(value)); }
   catch { /* A private browser may refuse persistence. */ }
+}
+
+function storedDisclosure(key, fallback) {
+  try {
+    const value = localStorage.getItem(`${DOCUMENT_DISCLOSURE_PREFIX}${key}`);
+    return value === null ? fallback : value === "true";
+  } catch {
+    return fallback;
+  }
+}
+
+function saveDisclosure(key, value) {
+  try { localStorage.setItem(`${DOCUMENT_DISCLOSURE_PREFIX}${key}`, String(value)); }
+  catch { /* A private browser may refuse persistence. */ }
+}
+
+function disclosure(className, key, label, defaultOpen) {
+  const details = node("details", className);
+  details.dataset.disclosureKey = key;
+  details.open = storedDisclosure(key, defaultOpen);
+  const summary = node("summary", "");
+  summary.dataset.disclosureKey = key;
+  summary.append(
+    node("span", "disclosure-chevron"),
+    node("span", "disclosure-label", label),
+  );
+  details.append(summary);
+  details.addEventListener("toggle", () => saveDisclosure(key, details.open));
+  return details;
 }
 
 function storedReviewWidth() {
@@ -289,10 +319,16 @@ function renderNav() {
     groups.get(entry.group).push(entry);
   }
   const list = document.createDocumentFragment();
+  const focusedDisclosure = document.activeElement?.dataset.disclosureKey;
   if (groups.size === 0) list.append(node("p", "muted", "No Markdown documents found."));
   for (const [label, items] of groups) {
-    const group = node("div", "doc-group");
-    group.append(node("h2", "", label));
+    const groupKey = `group:${label}`;
+    const group = disclosure("doc-group", groupKey, label, !label.startsWith("archive / "));
+    const active = items.some(entry => entry.id === currentId);
+    if (active) {
+      group.open = true;
+      saveDisclosure(groupKey, true);
+    }
     const regular = items.filter(entry => entry.kind !== "delta").sort((left, right) => {
       const rank = entry => ({ "design.md": 0, "proposal.md": 1, "tasks.md": 2 }[entry.label] ?? 3);
       return rank(left) - rank(right) || left.label.localeCompare(right.label);
@@ -300,9 +336,12 @@ function renderNav() {
     for (const entry of regular) group.append(documentLink(entry));
     const deltas = items.filter(entry => entry.kind === "delta");
     if (deltas.length) {
-      const folder = node("details", "delta-group");
-      folder.open = true;
-      folder.append(node("summary", "", "delta/"));
+      const deltaKey = `delta:${label}`;
+      const folder = disclosure("delta-group", deltaKey, "delta/", true);
+      if (deltas.some(entry => entry.id === currentId)) {
+        folder.open = true;
+        saveDisclosure(deltaKey, true);
+      }
       for (const entry of deltas) folder.append(documentLink(entry));
       group.append(folder);
     }
@@ -311,6 +350,11 @@ function renderNav() {
   const focusedId = document.activeElement?.dataset.docId;
   documents.replaceChildren(list);
   if (focusedId) [...documents.querySelectorAll(".doc-link")].find(link => link.dataset.docId === focusedId)?.focus({ preventScroll: true });
+  else if (focusedDisclosure) {
+    [...documents.querySelectorAll("summary[data-disclosure-key]")]
+      .find(summary => summary.dataset.disclosureKey === focusedDisclosure)
+      ?.focus({ preventScroll: true });
+  }
 }
 
 function documentLink(entry) {
