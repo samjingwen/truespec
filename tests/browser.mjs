@@ -125,9 +125,15 @@ async function stop(viewer) {
 }
 
 async function fixture(root, mode) {
-  const first = mode === "openspec" ? "openspec/specs/account/spec.md" : "docs/account.md";
-  const second = mode === "openspec" ? "openspec/changes/revise-login/design.md" : "docs/session.md";
-  const link = mode === "openspec" ? "../../changes/revise-login/design.md" : "session.md";
+  const first = mode === "openspec"
+    ? "openspec/specs/delivery/flux-reconciliation/spec.md"
+    : "docs/delivery/flux-reconciliation.md";
+  const second = mode === "openspec"
+    ? "openspec/changes/revise-login/design.md"
+    : "docs/delivery/image-and-release.md";
+  const link = mode === "openspec"
+    ? "../../../changes/revise-login/design.md"
+    : "image-and-release.md";
   const list = mode === "openspec"
     ? "- First goal.\n  - Nested goal.\n- Last goal."
     : "3. First goal.\n   - Nested goal.\n4. Last goal.";
@@ -161,14 +167,28 @@ This follows the list.
   await writeFile(join(root, first), source);
   await writeFile(join(root, second), "# Session policy\n\n## Timing\n\nA **formatted** 😀 `token` helps explain the expiry path.\n");
   if (mode === "openspec") {
+    await mkdir(join(root, "openspec/specs/delivery/image-and-release"), { recursive: true });
+    await mkdir(join(root, "openspec/specs/infrastructure/k3s-clusters"), { recursive: true });
+    await writeFile(join(root, "openspec/specs/delivery/image-and-release/spec.md"), "# Image and release\n");
+    await writeFile(join(root, "openspec/specs/infrastructure/k3s-clusters/spec.md"), "# K3s clusters\n");
     await writeFile(join(root, "openspec/changes/revise-login/proposal.md"), "# Proposal\n");
     await writeFile(join(root, "openspec/changes/revise-login/tasks.md"), "# Tasks\n");
-    await mkdir(join(root, "openspec/changes/revise-login/specs/account"), { recursive: true });
-    await writeFile(join(root, "openspec/changes/revise-login/specs/account/spec.md"), "# Account delta\n");
+    await mkdir(join(root, "openspec/changes/revise-login/specs/delivery/flux-reconciliation"), { recursive: true });
+    await writeFile(
+      join(root, "openspec/changes/revise-login/specs/delivery/flux-reconciliation/spec.md"),
+      "# Flux reconciliation delta\n",
+    );
     await mkdir(join(root, "openspec/changes/archive/older-one"), { recursive: true });
     await mkdir(join(root, "openspec/changes/archive/older-two"), { recursive: true });
     await writeFile(join(root, "openspec/changes/archive/older-one/proposal.md"), "# Older proposal\n");
     await writeFile(join(root, "openspec/changes/archive/older-two/tasks.md"), "# Older tasks\n");
+  } else {
+    await mkdir(join(root, "docs/infrastructure"), { recursive: true });
+    await mkdir(join(root, "docs/teams/shared"), { recursive: true });
+    await mkdir(join(root, "docs/products/shared"), { recursive: true });
+    await writeFile(join(root, "docs/infrastructure/k3s-clusters.md"), "# K3s clusters\n");
+    await writeFile(join(root, "docs/teams/shared/one.md"), "# Team shared\n");
+    await writeFile(join(root, "docs/products/shared/two.md"), "# Product shared\n");
   }
   return { first, second, source };
 }
@@ -408,14 +428,18 @@ async function exercise(mode, width) {
         "Initialized reviews show their paired integration without a standalone handoff");
       ${mode === "openspec" ? `
         const disclosureDefaults = await page.eval(() => {
-          const group = [...document.querySelectorAll(".doc-group")].find(item =>
-            item.querySelector(":scope > summary .disclosure-label")?.textContent === "change / revise-login");
-          const current = [...document.querySelectorAll(".doc-group")].find(item =>
-            item.querySelector(":scope > summary .disclosure-label")?.textContent === "Current specifications");
+          const group = document.querySelector("[data-disclosure-key='openspec:change:revise-login']");
+          const current = document.querySelector("[data-disclosure-key='openspec:current']");
           const archives = [...document.querySelectorAll(".doc-group")].filter(item =>
-            item.querySelector(":scope > summary .disclosure-label")?.textContent.startsWith("archive / "));
+            item.dataset.disclosureKey.startsWith("openspec:archive:"));
           const regular = [...group.children].filter(item => item.matches("a.doc-link")).map(item => item.textContent);
-          const folder = group.querySelector(".delta-group");
+          const delta = group.querySelector("[data-disclosure-key='openspec:change:revise-login/delta']");
+          const deltaDelivery = delta.querySelector(
+            "[data-disclosure-key='openspec:change:revise-login/delta/delivery']");
+          const currentDelivery = current.querySelector(
+            "[data-disclosure-key='openspec:current/delivery']");
+          const currentInfrastructure = current.querySelector(
+            "[data-disclosure-key='openspec:current/infrastructure']");
           return {
             currentOpen: current?.open,
             changeOpen: group?.open,
@@ -424,9 +448,14 @@ async function exercise(mode, width) {
               open: item.open,
             })),
             regular,
-            deltaOpen: folder?.open,
-            deltaLabel: folder?.querySelector("summary .disclosure-label")?.textContent,
-            deltas: [...folder.querySelectorAll(".doc-link")].map(item => item.textContent),
+            deltaOpen: delta?.open,
+            deltaLabel: delta?.querySelector(":scope > summary .disclosure-label")?.textContent,
+            deltaDeliveryLabel: deltaDelivery?.querySelector(":scope > summary .disclosure-label")?.textContent,
+            deltas: [...deltaDelivery.querySelectorAll(":scope > .doc-link")].map(item => item.textContent),
+            currentDelivery: [...currentDelivery.querySelectorAll(":scope > .doc-link")].map(item => item.textContent),
+            currentInfrastructure: [...currentInfrastructure.querySelectorAll(":scope > .doc-link")].map(item => item.textContent),
+            folderLabels: [...document.querySelectorAll(".document-folder > summary .disclosure-label")]
+              .map(item => item.textContent),
             hasLegacyDelta: group.textContent.includes("Delta:"),
           };
         });
@@ -434,60 +463,62 @@ async function exercise(mode, width) {
           && disclosureDefaults.archives.length
           && disclosureDefaults.archives.every(item => !item.open)
           && JSON.stringify(disclosureDefaults.regular) === JSON.stringify(["design.md", "proposal.md", "tasks.md"])
-          && disclosureDefaults.deltaOpen && disclosureDefaults.deltaLabel === "delta/"
-          && disclosureDefaults.deltas.join("|") === "account"
+          && disclosureDefaults.deltaOpen && disclosureDefaults.deltaLabel === "delta"
+          && disclosureDefaults.deltaDeliveryLabel === "delivery"
+          && disclosureDefaults.deltas.join("|") === "flux-reconciliation"
+          && disclosureDefaults.currentDelivery.join("|") === "flux-reconciliation|image-and-release"
+          && disclosureDefaults.currentInfrastructure.join("|") === "k3s-clusters"
+          && disclosureDefaults.folderLabels.every(label => !label.includes("/"))
           && !disclosureDefaults.hasLegacyDelta,
-          "Document disclosures use source-aware defaults without changing labels or ordering: "
+          "Adapters provide recursive OpenSpec hierarchy and separator-free labels: "
             + JSON.stringify(disclosureDefaults));
         await page.eval(() => {
-          const group = [...document.querySelectorAll(".doc-group")].find(item =>
-            item.querySelector(":scope > summary .disclosure-label")?.textContent === "change / revise-login");
+          const group = document.querySelector("[data-disclosure-key='openspec:change:revise-login']");
           group.querySelector(":scope > summary").focus();
         });
         await page.press("Enter");
         check(await page.eval(() => {
-          const group = [...document.querySelectorAll(".doc-group")].find(item =>
-            item.querySelector(":scope > summary .disclosure-label")?.textContent === "change / revise-login");
+          const group = document.querySelector("[data-disclosure-key='openspec:change:revise-login']");
           return !group.open && document.activeElement === group.querySelector(":scope > summary");
         }), "Enter toggles a top-level disclosure without moving summary focus");
         await page.press("Space");
         check(await page.eval(() => {
-          const group = [...document.querySelectorAll(".doc-group")].find(item =>
-            item.querySelector(":scope > summary .disclosure-label")?.textContent === "change / revise-login");
+          const group = document.querySelector("[data-disclosure-key='openspec:change:revise-login']");
           return group.open;
         }), "Space reopens a top-level disclosure");
-        await page.click(".doc-group .delta-group > summary");
-        await page.click(".doc-group[data-disclosure-key='group:archive / older-one'] > summary");
+        await page.click("[data-disclosure-key='openspec:change:revise-login/delta'] > summary");
+        await page.click("[data-disclosure-key='openspec:archive:older-one'] > summary");
         const disclosureUrl = await page.eval(() => location.href);
         await page.open(disclosureUrl);
         await page.wait("#article:not([hidden]) #login");
         check(await page.eval(() => {
-          const group = [...document.querySelectorAll(".doc-group")].find(item =>
-            item.querySelector(":scope > summary .disclosure-label")?.textContent === "change / revise-login");
+          const group = document.querySelector("[data-disclosure-key='openspec:change:revise-login']");
           const openedArchive = document.querySelector(
-            ".doc-group[data-disclosure-key='group:archive / older-one']");
+            ".doc-group[data-disclosure-key='openspec:archive:older-one']");
           const otherArchives = [...document.querySelectorAll(".doc-group")].filter(item =>
-            item.dataset.disclosureKey.startsWith("group:archive / ")
+            item.dataset.disclosureKey.startsWith("openspec:archive:")
               && item !== openedArchive);
-          return group.open && !group.querySelector(".delta-group").open
+          return group.open
+            && !group.querySelector("[data-disclosure-key='openspec:change:revise-login/delta']").open
             && openedArchive.open && otherArchives.every(item => !item.open);
         }), "Top-level and nested disclosure states persist independently after reload");
         const deltaHref = await page.eval(() => {
-          const group = [...document.querySelectorAll(".doc-group")].find(item =>
-            item.querySelector(":scope > summary .disclosure-label")?.textContent === "change / revise-login");
-          return group.querySelector(".delta-group .doc-link").href;
+          return document.querySelector(
+            "[data-disclosure-key='openspec:change:revise-login/delta/delivery'] > .doc-link").href;
         });
         await page.open(deltaHref);
         await page.wait(".doc-link[aria-current='page']");
         check(await page.eval(() => {
           const active = document.querySelector(".doc-link[aria-current='page']");
-          return active.closest(".doc-group").open && active.closest(".delta-group").open
-            && localStorage.getItem("truespec.documents.disclosure:group:change / revise-login") === "true"
-            && localStorage.getItem("truespec.documents.disclosure:delta:change / revise-login") === "true";
+          return [...active.parentElement.closest(".doc-group").querySelectorAll("details")]
+            .filter(folder => folder.contains(active)).every(folder => folder.open)
+            && active.closest(".doc-group").open
+            && localStorage.getItem("truespec.documents.disclosure:openspec:change:revise-login") === "true"
+            && localStorage.getItem("truespec.documents.disclosure:openspec:change:revise-login/delta") === "true"
+            && localStorage.getItem("truespec.documents.disclosure:openspec:change:revise-login/delta/delivery") === "true";
         }), "A selected delta document opens and persists every ancestor disclosure");
         await page.eval(() => {
-          const group = [...document.querySelectorAll(".doc-group")].find(item =>
-            item.querySelector(":scope > summary .disclosure-label")?.textContent === "change / revise-login");
+          const group = document.querySelector("[data-disclosure-key='openspec:change:revise-login']");
           group.open = false;
           group.dispatchEvent(new Event("toggle"));
           const href = [...group.querySelectorAll(":scope > .doc-link")]
@@ -502,14 +533,24 @@ async function exercise(mode, width) {
         }), "Browser-history navigation reveals a document inside a closed group");
         await page.open(${JSON.stringify(viewer.url)});
         await page.wait("#article:not([hidden]) #login");
-        await page.click(".doc-group .delta-group > summary");
+        await page.click("[data-disclosure-key='openspec:change:revise-login/delta'] > summary");
       ` : `
         await showPanel("documents");
         check(await page.eval(() => {
-          const group = document.querySelector(".doc-group");
-          return group.matches("details") && group.open
-            && group.querySelector(":scope > summary .disclosure-label").textContent === "Documents";
-        }), "Markdown directory groups use the same open disclosure in the mobile drawer");
+          const root = document.querySelector("[data-disclosure-key='markdown:documents']");
+          const delivery = document.querySelector("[data-disclosure-key='markdown:documents/delivery']");
+          const infrastructure = document.querySelector("[data-disclosure-key='markdown:documents/infrastructure']");
+          const teamShared = document.querySelector("[data-disclosure-key='markdown:documents/teams/shared']");
+          const productShared = document.querySelector("[data-disclosure-key='markdown:documents/products/shared']");
+          return root.open && delivery.open && infrastructure.open && teamShared.open && productShared.open
+            && [...delivery.querySelectorAll(":scope > .doc-link")].map(link => link.textContent).join("|")
+              === "flux-reconciliation.md|image-and-release.md"
+            && [...infrastructure.querySelectorAll(":scope > .doc-link")].map(link => link.textContent).join("|")
+              === "k3s-clusters.md"
+            && teamShared.dataset.disclosureKey !== productShared.dataset.disclosureKey
+            && [...document.querySelectorAll(".document-folder > summary .disclosure-label")]
+              .every(label => !label.textContent.includes("/"));
+        }), "Markdown adapters provide recursive folders and independent duplicate names in the mobile drawer");
         await page.eval(() => document.querySelector(".doc-group > summary").focus());
         await page.press("Enter");
         const mobileDisclosureState = await page.eval(() => ({
@@ -608,9 +649,9 @@ async function exercise(mode, width) {
       await page.wait("#doc-notice:not([hidden])");
       ${mode === "openspec" ? `
         check(await page.eval(() => {
-          const group = [...document.querySelectorAll(".doc-group")].find(item =>
-            item.querySelector(":scope > summary .disclosure-label")?.textContent === "change / revise-login");
-          return group.open && !group.querySelector(".delta-group").open;
+          const group = document.querySelector("[data-disclosure-key='openspec:change:revise-login']");
+          return group.open
+            && !group.querySelector("[data-disclosure-key='openspec:change:revise-login/delta']").open;
         }), "Source refresh preserves independent disclosure state");
       ` : ""}
       check(await page.eval(() => document.querySelector("#line-comment").value === "Define the exact timeout.\\nInclude units."), "Refresh must preserve the open composer");

@@ -84,17 +84,17 @@ button:disabled { cursor: default; opacity: 0.58; }
 .layout[data-review-expanded="true"] .edge-toggle { display: none; }
 .doc-group { margin-top: 1rem; }
 .doc-group > summary,
-.delta-group > summary { display: flex; align-items: center; gap: 0.38rem; list-style: none; cursor: pointer; border-radius: 0.3rem; color: var(--quiet); font-weight: 680; overflow-wrap: anywhere; }
+.document-folder > summary { display: flex; align-items: center; gap: 0.38rem; list-style: none; cursor: pointer; border-radius: 0.3rem; color: var(--quiet); font-weight: 680; overflow-wrap: anywhere; }
 .doc-group > summary::-webkit-details-marker,
-.delta-group > summary::-webkit-details-marker { display: none; }
+.document-folder > summary::-webkit-details-marker { display: none; }
 .doc-group > summary { font-size: 0.73rem; line-height: 1.35; margin: 0 0 0.22rem; padding: 0.28rem 0.45rem; }
 .doc-group > summary:hover,
-.delta-group > summary:hover { color: var(--ink); background: var(--inset); }
+.document-folder > summary:hover { color: var(--ink); background: var(--inset); }
 .disclosure-chevron { flex: 0 0 auto; width: 0.42rem; height: 0.42rem; border-right: 1.3px solid currentColor; border-bottom: 1.3px solid currentColor; transform: rotate(-45deg); transition: transform 140ms ease-out; }
 details[open] > summary > .disclosure-chevron { transform: rotate(45deg); }
-.delta-group { margin: 0.25rem 0 0 0.55rem; }
-.delta-group > summary { padding: 0.3rem 0.45rem; font-size: 0.8rem; font-weight: 650; }
-.delta-group .doc-link { padding-left: 0.85rem; }
+.document-folder { margin: 0.25rem 0 0 0.55rem; }
+.document-folder > summary { padding: 0.3rem 0.45rem; font-size: 0.8rem; font-weight: 650; }
+.document-folder > .doc-link { padding-left: 0.85rem; }
 .doc-link { display: block; border-radius: 0.3rem; padding: 0.42rem 0.45rem 0.42rem 0.72rem; color: var(--ink); text-decoration: none; font-size: 0.84rem; overflow-wrap: anywhere; }
 .doc-link:hover { background: var(--inset); }
 .doc-link[aria-current="page"] { background: var(--accent-soft); color: var(--accent); font-weight: 660; }

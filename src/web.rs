@@ -293,8 +293,22 @@ fn catalog(app: &App) -> Result<Vec<Entry>> {
         .collect::<Vec<_>>();
     entries.sort_by_key(|entry| match entry.info.kind {
         "spec" => 0,
-        _ if entry.info.group.starts_with("change / ") => 1,
-        _ if entry.info.group.starts_with("archive / ") => 3,
+        _ if entry
+            .info
+            .navigation
+            .first()
+            .is_some_and(|segment| segment.id.starts_with("openspec:change:")) =>
+        {
+            1
+        }
+        _ if entry
+            .info
+            .navigation
+            .first()
+            .is_some_and(|segment| segment.id.starts_with("openspec:archive:")) =>
+        {
+            3
+        }
         _ => 2,
     });
     Ok(entries)

@@ -313,40 +313,11 @@ function workspacePath() {
 
 function renderNav() {
   elements["document-count"].textContent = String(entries.length);
-  const groups = new Map();
-  for (const entry of entries) {
-    if (!groups.has(entry.group)) groups.set(entry.group, []);
-    groups.get(entry.group).push(entry);
-  }
   const list = document.createDocumentFragment();
   const focusedDisclosure = document.activeElement?.dataset.disclosureKey;
-  if (groups.size === 0) list.append(node("p", "muted", "No Markdown documents found."));
-  for (const [label, items] of groups) {
-    const groupKey = `group:${label}`;
-    const group = disclosure("doc-group", groupKey, label, !label.startsWith("archive / "));
-    const active = items.some(entry => entry.id === currentId);
-    if (active) {
-      group.open = true;
-      saveDisclosure(groupKey, true);
-    }
-    const regular = items.filter(entry => entry.kind !== "delta").sort((left, right) => {
-      const rank = entry => ({ "design.md": 0, "proposal.md": 1, "tasks.md": 2 }[entry.label] ?? 3);
-      return rank(left) - rank(right) || left.label.localeCompare(right.label);
-    });
-    for (const entry of regular) group.append(documentLink(entry));
-    const deltas = items.filter(entry => entry.kind === "delta");
-    if (deltas.length) {
-      const deltaKey = `delta:${label}`;
-      const folder = disclosure("delta-group", deltaKey, "delta/", true);
-      if (deltas.some(entry => entry.id === currentId)) {
-        folder.open = true;
-        saveDisclosure(deltaKey, true);
-      }
-      for (const entry of deltas) folder.append(documentLink(entry));
-      group.append(folder);
-    }
-    list.append(group);
-  }
+  const tree = navigationTree(entries);
+  if (!tree.length) list.append(node("p", "muted", "No Markdown documents found."));
+  for (const branch of tree) list.append(renderNavigationBranch(branch, true));
   const focusedId = document.activeElement?.dataset.docId;
   documents.replaceChildren(list);
   if (focusedId) [...documents.querySelectorAll(".doc-link")].find(link => link.dataset.docId === focusedId)?.focus({ preventScroll: true });
@@ -355,6 +326,47 @@ function renderNav() {
       .find(summary => summary.dataset.disclosureKey === focusedDisclosure)
       ?.focus({ preventScroll: true });
   }
+}
+
+function navigationTree(documents) {
+  const root = { children: [], childById: new Map(), documents: [] };
+  for (const entry of documents) {
+    let parent = root;
+    for (const segment of entry.navigation) {
+      let branch = parent.childById.get(segment.id);
+      if (!branch) {
+        branch = {
+          segment,
+          children: [],
+          childById: new Map(),
+          documents: [],
+          containsActive: false,
+        };
+        parent.childById.set(segment.id, branch);
+        parent.children.push(branch);
+      }
+      if (entry.id === currentId) branch.containsActive = true;
+      parent = branch;
+    }
+    parent.documents.push(entry);
+  }
+  return root.children;
+}
+
+function renderNavigationBranch(branch, topLevel = false) {
+  const details = disclosure(
+    topLevel ? "doc-group" : "document-folder",
+    branch.segment.id,
+    branch.segment.label,
+    branch.segment.default_open,
+  );
+  if (branch.containsActive) {
+    details.open = true;
+    saveDisclosure(branch.segment.id, true);
+  }
+  for (const entry of branch.documents) details.append(documentLink(entry));
+  for (const child of branch.children) details.append(renderNavigationBranch(child));
+  return details;
 }
 
 function documentLink(entry) {

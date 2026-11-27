@@ -17,7 +17,7 @@ It serves an embedded browser UI, stores review state separately, and delivers d
 
 ## Ownership
 
-- `src/source.rs` owns the source-adapter registry and document-source implementations.
+- `src/source.rs` owns the source-adapter registry, document-source implementations, and structured navigation hierarchy.
 - `src/project.rs` owns versioned project configuration and repository-root validation.
 - `src/initialize.rs` owns integration selection, complete preflight, and generated-file installation.
 - `src/integration.rs` owns the coding-harness integration registry and installation artifacts.
@@ -34,6 +34,7 @@ It serves an embedded browser UI, stores review state separately, and delivers d
 
 - Keep document-source adapters independent from coding-harness connectors.
 - Keep source and integration adapters registered at compile time and independent from the shared review core.
+- Derive navigation segments, stable folder IDs, leaf labels, and default disclosure state inside source adapters; keep the browser renderer source-independent.
 - Treat `truespec/config/project.json` as shared project configuration and integration selection as user-local state.
 - Keep the shared review core independent from OpenSpec and any one agent harness.
 - Read OpenSpec artifacts in place without merging deltas or changing OpenSpec workflow state.
