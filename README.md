@@ -84,12 +84,21 @@ The shared review core does not require OpenSpec or OpenCode.
 - A Git repository root for project initialization; TrueSpec does not invoke the Git executable.
 - macOS or Linux for the currently verified delivery paths.
 
-Clone and install:
+Install directly from the public repository:
 
 ```sh
-git clone https://github.com/samjingwen/truespec.git
-cd truespec
-cargo install --path . --locked
+cargo install \
+  --git https://github.com/samjingwen/truespec.git \
+  --locked
+```
+
+Upgrade an existing installation:
+
+```sh
+cargo install \
+  --git https://github.com/samjingwen/truespec.git \
+  --locked \
+  --force
 ```
 
 Verify:
