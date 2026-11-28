@@ -765,6 +765,11 @@ fn init_installs_and_protects_the_complete_opencode_bundle() {
     assert!(generated_plugin.contains("output.url"));
     assert!(generated_plugin.contains("connection_id: output.connection_id"));
     assert!(!generated_plugin.contains("{ ...output, sessionID"));
+    assert!(generated_plugin.contains("text: reviewURLs.join(\"\\n\")"));
+    assert!(!generated_plugin.contains("TrueSpec review:"));
+    assert!(!generated_plugin.contains("openBrowser"));
+    assert!(!generated_plugin.contains("xdg-open"));
+    assert!(!generated_plugin.contains("explorer.exe"));
     assert!(generated_plugin.contains("truespec init --integration opencode --force"));
     assert!(
         generated_plugin.contains(&Path::new(CLI).canonicalize().unwrap().display().to_string())
