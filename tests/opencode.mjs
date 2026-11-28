@@ -226,10 +226,22 @@ fi
     else if (value && typeof value === "object") Object.values(value).forEach(item => stringValues(item, values));
     return values;
   };
-  const syntheticStringsFor = async path => stringValues([
+  const descriptionValues = (value, values = []) => {
+    if (Array.isArray(value)) value.forEach(item => descriptionValues(item, values));
+    else if (value && typeof value === "object") {
+      if (typeof value.description === "string") values.push(value.description);
+      Object.values(value).forEach(item => descriptionValues(item, values));
+    }
+    return values;
+  };
+  const syntheticPayloadFor = async path => [
     await openCode(`${path}/inbox`),
     await openCode(`${path}/message?type=synthetic`),
-  ]);
+  ];
+  const syntheticStringsFor = async path =>
+    stringValues(await syntheticPayloadFor(path));
+  const syntheticDescriptionsFor = async path =>
+    descriptionValues(await syntheticPayloadFor(path));
   const addedStrings = (before, after) => {
     const remaining = new Map();
     before.forEach(value => remaining.set(value, (remaining.get(value) || 0) + 1));
@@ -247,10 +259,13 @@ fi
   let viewer = new URL(`${selected.pathname}${selected.search}`, initialService.endpoint).href;
   const tailnetMessage = `${selectedViewer}\n${viewer}`;
   const tailnetSynthetic = await syntheticStringsFor(chat);
-  assert.deepEqual(
-    tailnetSynthetic.filter(value => value.includes(selectedViewer)),
-    [tailnetMessage],
-  );
+  const tailnetTextValues = tailnetSynthetic.filter(value => value.includes(selectedViewer));
+  assert.ok(tailnetTextValues.length > 0);
+  assert.ok(tailnetTextValues.every(value => value === tailnetMessage));
+  const tailnetDescriptions = (await syntheticDescriptionsFor(chat))
+    .filter(value => value.includes(selectedViewer));
+  assert.ok(tailnetDescriptions.length > 0);
+  assert.ok(tailnetDescriptions.every(value => value === tailnetMessage));
   assert.equal(tailnetSynthetic.some(value => value.includes("TrueSpec review:")), false);
   const review = selected.searchParams.get("review");
   assert.ok(review);
@@ -409,6 +424,7 @@ fi
       }));
   });
   const syntheticBeforeLocalRestart = await syntheticStringsFor(chat);
+  const descriptionsBeforeLocalRestart = await syntheticDescriptionsFor(chat);
   const beforeRestart = JSON.parse((await lifecycle(["status", "--json"])).text);
   assert.equal(beforeRestart.tailnet.enabled, true);
   assert.equal((await lifecycle(["down", "--json"])).ok, true);
@@ -426,10 +442,16 @@ fi
   const previousViewer = new URL(viewer);
   viewer = new URL(`${previousViewer.pathname}${previousViewer.search}`, afterRestart.endpoint).href;
   const localSynthetic = addedStrings(syntheticBeforeLocalRestart, await syntheticStringsFor(chat));
-  assert.deepEqual(
-    localSynthetic.filter(value => value.includes(viewer)),
-    [viewer],
+  const localTextValues = localSynthetic.filter(value => value.includes(viewer));
+  assert.ok(localTextValues.length > 0);
+  assert.ok(localTextValues.every(value => value === viewer));
+  const localDescriptions = addedStrings(
+    descriptionsBeforeLocalRestart,
+    await syntheticDescriptionsFor(chat),
   );
+  const visibleLocalDescriptions = localDescriptions.filter(value => value.includes(viewer));
+  assert.ok(visibleLocalDescriptions.length > 0);
+  assert.ok(visibleLocalDescriptions.every(value => value === viewer));
   assert.equal(localSynthetic.some(value => value.includes("TrueSpec review:")), false);
 
   const secondBatch = await round("Use revision two.", "Revision two.", true);
