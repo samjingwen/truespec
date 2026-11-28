@@ -22,3 +22,10 @@
 
 - Archive the change after implementation and browser review are complete.
 - Verify the `document-reading` delta is synced to the accepted specification.
+
+## 4. Group OpenSpec lifecycle roots
+
+- [x] 4.1 Revise the proposal, design, and `document-reading` delta to define shared **Changes** and **Archives** disclosures, stable named-child IDs, and the selected open defaults; verify the change passes strict OpenSpec validation.
+- [x] 4.2 Emit the shared lifecycle segments from `OpenSpecSource`, preserve existing named-child IDs, remove structural separators from every label, and update focused Rust tests.
+- [x] 4.3 Extend browser coverage for shared-root defaults, independent lifecycle and child persistence, keyboard operation, and active-document reveal at desktop and phone widths.
+- [x] 4.4 Remove the experimental README warning, update the public navigation description, run the Impeccable detector and complete verification gates, and inspect the public diff for unrelated changes or private paths.

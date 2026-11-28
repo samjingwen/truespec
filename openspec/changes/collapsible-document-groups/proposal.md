@@ -11,12 +11,14 @@ Collapsible groups let reviewers focus on relevant work while keeping the active
 - Derive OpenSpec hierarchy inside `OpenSpecSource` from discovered schema and artifact paths.
 - Derive plain Markdown hierarchy inside `MarkdownFolderSource` from actual directories.
 - Render every navigation level as a native collapsible disclosure without parsing display labels in the browser.
-- Keep current specifications, active changes, and plain Markdown directories open by default.
-- Keep archived changes closed by default.
+- Group every active change under one shared **Changes** disclosure.
+- Group every archived change under one shared **Archives** disclosure.
+- Keep current specifications, both shared lifecycle disclosures, active changes, and plain Markdown directories open by default.
+- Keep individual archived changes closed by default.
 - Preserve each group's open state locally across reloads.
 - Preserve every nested folder state independently from its ancestors.
 - Automatically open all ancestor disclosures when navigation selects a document inside a collapsed group.
-- Display directory names such as `delivery` and `delta` without structural slash characters.
+- Display lifecycle, change, archive, directory, and `delta` names without structural slash characters.
 - Use the same keyboard-accessible behavior on desktop and narrow drawer layouts.
 
 ## Capabilities

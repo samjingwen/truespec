@@ -275,7 +275,8 @@ struct OpenSpecSource(Tree);
 
 impl DocumentSource for OpenSpecSource {
     fn list(&self) -> Result<Vec<Document>> {
-        self.0
+        let mut documents = self
+            .0
             .files()?
             .iter()
             .map(|path| {
@@ -296,14 +297,8 @@ impl DocumentSource for OpenSpecSource {
                         )
                     }
                     ["changes", "archive", change, "specs", rest @ ..] if !rest.is_empty() => {
-                        let root_id = format!("openspec:archive:{change}");
-                        let root = NavigationSegment {
-                            id: root_id.clone(),
-                            label: format!("archive / {change}"),
-                            default_open: false,
-                        };
-                        let delta_id = format!("{root_id}/delta");
-                        let mut path = navigation(root, &root_id, &[]);
+                        let (mut path, change_id) = change_navigation(change, true);
+                        let delta_id = format!("{change_id}/delta");
                         path.push(NavigationSegment {
                             id: delta_id.clone(),
                             label: "delta".into(),
@@ -314,24 +309,14 @@ impl DocumentSource for OpenSpecSource {
                         (path, "delta", label)
                     }
                     ["changes", "archive", change, rest @ ..] if !rest.is_empty() => {
-                        let root_id = format!("openspec:archive:{change}");
-                        let root = NavigationSegment {
-                            id: root_id.clone(),
-                            label: format!("archive / {change}"),
-                            default_open: false,
-                        };
+                        let (mut path, change_id) = change_navigation(change, true);
                         let (directories, label) = file_parts(rest);
-                        (navigation(root, &root_id, directories), "archived", label)
+                        path.extend(nested_navigation(&change_id, directories));
+                        (path, "archived", label)
                     }
                     ["changes", change, "specs", rest @ ..] if !rest.is_empty() => {
-                        let root_id = format!("openspec:change:{change}");
-                        let root = NavigationSegment {
-                            id: root_id.clone(),
-                            label: format!("change / {change}"),
-                            default_open: true,
-                        };
-                        let delta_id = format!("{root_id}/delta");
-                        let mut path = navigation(root, &root_id, &[]);
+                        let (mut path, change_id) = change_navigation(change, false);
+                        let delta_id = format!("{change_id}/delta");
                         path.push(NavigationSegment {
                             id: delta_id.clone(),
                             label: "delta".into(),
@@ -342,14 +327,10 @@ impl DocumentSource for OpenSpecSource {
                         (path, "delta", label)
                     }
                     ["changes", change, rest @ ..] if !rest.is_empty() => {
-                        let root_id = format!("openspec:change:{change}");
-                        let root = NavigationSegment {
-                            id: root_id.clone(),
-                            label: format!("change / {change}"),
-                            default_open: true,
-                        };
+                        let (mut path, change_id) = change_navigation(change, false);
                         let (directories, label) = file_parts(rest);
-                        (navigation(root, &root_id, directories), "change", label)
+                        path.extend(nested_navigation(&change_id, directories));
+                        (path, "change", label)
                     }
                     _ => {
                         let root_id = "openspec:workspace";
@@ -364,11 +345,30 @@ impl DocumentSource for OpenSpecSource {
                 };
                 self.0.document(path, label, navigation, kind)
             })
-            .collect()
+            .collect::<Result<Vec<_>>>()?;
+        documents.sort_by(|left, right| {
+            openspec_navigation_rank(left)
+                .cmp(&openspec_navigation_rank(right))
+                .then_with(|| left.path.cmp(&right.path))
+        });
+        Ok(documents)
     }
 
     fn read(&self, locator: &str) -> Result<Option<Snapshot>> {
         self.0.read(locator)
+    }
+}
+
+fn openspec_navigation_rank(document: &Document) -> u8 {
+    match document
+        .navigation
+        .first()
+        .map(|segment| segment.id.as_str())
+    {
+        Some("openspec:current") => 0,
+        Some("openspec:changes") => 1,
+        Some("openspec:archives") => 2,
+        _ => 3,
     }
 }
 
@@ -384,6 +384,37 @@ fn file_parts<'a>(parts: &'a [&'a str]) -> (&'a [&'a str], String) {
         [directories @ .., file] => (directories, (*file).into()),
         [] => (&[], String::new()),
     }
+}
+
+fn change_navigation(change: &str, archived: bool) -> (Vec<NavigationSegment>, String) {
+    let (collection_id, collection_label, change_id) = if archived {
+        (
+            "openspec:archives",
+            "Archives",
+            format!("openspec:archive:{change}"),
+        )
+    } else {
+        (
+            "openspec:changes",
+            "Changes",
+            format!("openspec:change:{change}"),
+        )
+    };
+    (
+        vec![
+            NavigationSegment {
+                id: collection_id.into(),
+                label: collection_label.into(),
+                default_open: true,
+            },
+            NavigationSegment {
+                id: change_id.clone(),
+                label: change.into(),
+                default_open: !archived,
+            },
+        ],
+        change_id,
+    )
 }
 
 fn navigation(
@@ -482,31 +513,31 @@ mod tests {
                 "openspec/changes/new/proposal.md",
                 "change",
                 "proposal.md",
-                vec!["change / new"],
+                vec!["Changes", "new"],
             ),
             (
                 "openspec/changes/new/notes/sketch.md",
                 "change",
                 "sketch.md",
-                vec!["change / new", "notes"],
+                vec!["Changes", "new", "notes"],
             ),
             (
                 "openspec/changes/new/specs/delivery/flux-reconciliation/spec.md",
                 "delta",
                 "flux-reconciliation",
-                vec!["change / new", "delta", "delivery"],
+                vec!["Changes", "new", "delta", "delivery"],
             ),
             (
                 "openspec/changes/archive/old/tasks.md",
                 "archived",
                 "tasks.md",
-                vec!["archive / old"],
+                vec!["Archives", "old"],
             ),
             (
                 "openspec/changes/archive/old/specs/auth/spec.md",
                 "delta",
                 "auth",
-                vec!["archive / old", "delta"],
+                vec!["Archives", "old", "delta"],
             ),
         ];
         for (path, _, _, _) in &paths {
@@ -518,6 +549,15 @@ mod tests {
             .unwrap();
         let entries = src.list().unwrap();
         assert_eq!(entries.len(), paths.len());
+        let mut semantic_roots = entries
+            .iter()
+            .map(|entry| entry.navigation.first().unwrap().id.as_str())
+            .collect::<Vec<_>>();
+        semantic_roots.dedup();
+        assert_eq!(
+            semantic_roots,
+            ["openspec:current", "openspec:changes", "openspec:archives"]
+        );
         for (path, kind, label, navigation) in paths {
             let entry = entries.iter().find(|entry| entry.path == path).unwrap();
             assert_eq!((entry.kind, entry.label.as_str()), (kind, label));
@@ -533,12 +573,23 @@ mod tests {
                 entry
                     .navigation
                     .iter()
-                    .skip(1)
                     .all(|segment| !segment.label.contains('/'))
             );
             assert!(!entry.label.contains('/'));
             assert!(src.read(path).unwrap().is_some());
         }
+        let active = entries
+            .iter()
+            .find(|entry| entry.path == "openspec/changes/new/proposal.md")
+            .unwrap();
+        assert!(active.navigation[0].default_open);
+        assert!(active.navigation[1].default_open);
+        let archived = entries
+            .iter()
+            .find(|entry| entry.path == "openspec/changes/archive/old/tasks.md")
+            .unwrap();
+        assert!(archived.navigation[0].default_open);
+        assert!(!archived.navigation[1].default_open);
     }
 
     #[test]

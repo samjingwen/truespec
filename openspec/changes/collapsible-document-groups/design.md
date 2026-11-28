@@ -48,15 +48,18 @@ struct Document {
 Segment IDs are adapter-owned stable identities.
 Labels are presentation text and never encode hierarchy with `/`.
 The browser uses IDs for persistence and labels only for display.
+Shared lifecycle roots use `openspec:changes` and `openspec:archives`.
+Existing per-change and per-archive IDs remain unchanged beneath those roots so previously saved item state survives the hierarchy correction.
 
 ### Derive OpenSpec hierarchy in OpenSpecSource
 
 The OpenSpec adapter maps discovered artifacts into semantic roots and real nested paths:
 
 - `specs/delivery/flux-reconciliation/spec.md` becomes **Current specifications** > **delivery** > **flux-reconciliation**.
-- `changes/name/specs/delivery/flux-reconciliation/spec.md` becomes **change / name** > **delta** > **delivery** > **flux-reconciliation**.
-- Archived artifacts use **archive / name** as the root, closed by default.
+- `changes/name/specs/delivery/flux-reconciliation/spec.md` becomes **Changes** > **name** > **delta** > **delivery** > **flux-reconciliation**.
+- Archived artifacts use **Archives** > **name**, with the shared lifecycle root open and each named archive closed by default.
 - Ordinary, unfamiliar, and custom-schema artifacts retain every real directory level beneath their change or archive root.
+- Semantic roots are ordered as **Current specifications**, **Changes**, **Archives**, then unfamiliar workspace artifacts instead of inheriting lexical path order.
 
 Only the adapter understands those boundaries.
 The browser does not inspect OpenSpec paths or kinds to reconstruct folders.
@@ -86,8 +89,10 @@ Missing or invalid storage falls back to defaults without blocking navigation.
 Default open state is:
 
 - `Current specifications`: open.
-- `change / ...`: open.
-- `archive / ...`: closed.
+- `Changes`: open.
+- Named active changes: open.
+- `Archives`: open.
+- Named archived changes: closed.
 - Other Markdown directory groups: open.
 - Nested directories and `delta`: open.
 
@@ -129,3 +134,4 @@ If focus was on a folder summary, restore it by segment ID.
 No server or data migration is required.
 Existing label-based disclosure preferences are not migrated because the structured IDs have different semantics.
 Users receive source-aware defaults once, then new segment-ID preferences persist after toggles.
+The existing active-change and archive IDs remain stable, while the two new shared lifecycle roots receive their selected open defaults once.
