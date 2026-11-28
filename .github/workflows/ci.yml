@@ -1,0 +1,88 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - master
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  quality:
+    name: Quality
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Rust
+        run: |
+          rustup toolchain install 1.95.0 --profile minimal --component clippy,rustfmt --no-self-update
+          rustup default 1.95.0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@2028fbc5c25fe9cf00d9f06a71cc4710d4507903 # v6.0.0
+        with:
+          node-version: 26.13.1
+
+      - name: Install OpenSpec
+        run: npm install --global --omit=dev @fission-ai/openspec@2.1.0
+
+      - name: Check formatting
+        run: cargo fmt --check
+
+      - name: Run Clippy
+        run: cargo clippy --locked --all-targets -- -D warnings
+
+      - name: Run Rust tests
+        run: cargo test --locked
+
+      - name: Validate OpenSpec
+        run: openspec validate --all --strict
+
+  integration:
+    name: Browser and OpenCode
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      CHROME_DEVTOOLS_AXI_CHROME_ARGS: --headless=new --no-sandbox --disable-dev-shm-usage
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Rust
+        run: |
+          rustup toolchain install 1.95.0 --profile minimal --no-self-update
+          rustup default 1.95.0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@2028fbc5c25fe9cf00d9f06a71cc4710d4507903 # v6.0.0
+        with:
+          node-version: 26.13.1
+
+      - name: Install integration tools
+        run: |
+          npm install --global --omit=dev \
+            @opencode/cli@2.4.2 \
+            chrome-devtools-axi@0.1.46 \
+            chrome-devtools-mcp@1.14.0
+
+      - name: Build TrueSpec
+        run: cargo build --locked
+
+      - name: Run browser integration
+        run: node tests/browser.mjs
+
+      - name: Run OpenCode integration
+        run: node tests/opencode.mjs
