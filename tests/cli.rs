@@ -530,7 +530,7 @@ fn hidden_viewer_and_attach_use_initialized_source_configuration() {
             &[
                 "connector",
                 "--protocol",
-                "2",
+                "3",
                 "attach",
                 "--kind",
                 "test",
@@ -608,6 +608,19 @@ fn public_help_exposes_only_initialization_and_service_lifecycle() {
     assert!(
         Command::new(CLI)
             .args(["connector", "--help"])
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+    let up = Command::new(CLI).args(["up", "--help"]).output().unwrap();
+    assert!(up.status.success());
+    let up = String::from_utf8(up.stdout).unwrap();
+    assert!(up.contains("--tailnet"));
+    assert!(up.contains("--tailnet-port"));
+    assert!(
+        !Command::new(CLI)
+            .args(["up", "--tailnet-port", "9443"])
             .output()
             .unwrap()
             .status
@@ -746,10 +759,12 @@ fn init_installs_and_protects_the_complete_opencode_bundle() {
     let generated_plugin = fs::read_to_string(&plugin).unwrap();
     let generated_skill = fs::read_to_string(&skill).unwrap();
     assert!(!generated_plugin.contains("__TRUESPEC_INSTALLED_BINARY__"));
-    assert!(generated_plugin.contains("const PROTOCOL = 2"));
+    assert!(generated_plugin.contains("const PROTOCOL = 3"));
     assert!(!generated_plugin.contains("\"serve\""));
     assert!(!generated_plugin.contains("viewerByWorkspace"));
     assert!(generated_plugin.contains("output.url"));
+    assert!(generated_plugin.contains("connection_id: output.connection_id"));
+    assert!(!generated_plugin.contains("{ ...output, sessionID"));
     assert!(generated_plugin.contains("truespec init --integration opencode --force"));
     assert!(
         generated_plugin.contains(&Path::new(CLI).canonicalize().unwrap().display().to_string())
@@ -1106,7 +1121,7 @@ fn a_versioned_connector_owns_its_batches_across_review_rounds() {
             &[
                 "connector",
                 "--protocol",
-                "2",
+                "3",
                 "attach",
                 "--kind",
                 "test-harness",
@@ -1119,8 +1134,30 @@ fn a_versioned_connector_owns_its_batches_across_review_rounds() {
         )
     };
     let binding: Value = serde_json::from_str(&attach(root, "test-chat", true)).unwrap();
-    assert_eq!(binding["protocol_version"], 2);
+    assert_eq!(binding["protocol_version"], 3);
     assert_eq!(binding["review_id"], viewer.review);
+    let stale = configured_command(
+        root,
+        &[
+            "connector",
+            "--protocol",
+            "2",
+            "attach",
+            "--kind",
+            "test-harness",
+            "--destination",
+            "stale-chat",
+            "--label",
+            "Test Harness",
+        ],
+    )
+    .output()
+    .unwrap();
+    assert!(!stale.status.success());
+    assert!(
+        String::from_utf8_lossy(&stale.stderr)
+            .contains("truespec init --integration opencode --force")
+    );
     assert_eq!(
         serde_json::from_str::<Value>(&attach(root, "test-chat", true)).unwrap(),
         binding

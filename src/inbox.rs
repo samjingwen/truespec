@@ -10,7 +10,7 @@ use serde::Serialize;
 use crate::review::{BatchItem, Problem, Store, conflict, new_id, now, validate_connector_text};
 
 const LEASE_MS: i64 = 5 * 60 * 1000;
-pub const PROTOCOL_VERSION: u8 = 2;
+pub const PROTOCOL_VERSION: u8 = 3;
 
 pub struct LocalInbox(pub Store);
 

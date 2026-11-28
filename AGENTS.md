@@ -26,6 +26,7 @@ It serves an embedded browser UI, stores review state separately, and delivers d
 - `src/review.rs` owns SQLite review state and immutable batch snapshots.
 - `src/inbox.rs` owns connector leasing, receipts, retries, and delivery envelopes.
 - `src/service.rs` owns private global paths, lifecycle discovery, authentication, owner locking, process control, and bounded operational logs.
+- `src/tailnet.rs` owns bounded Tailscale CLI discovery, private DNS validation, Serve listener inspection, exact listener mutation, and remote readiness checks.
 - `src/service_registry.rs` owns minimal global workspace routing metadata and lazy validated project contexts.
 - `src/web.rs` owns the loopback HTTP API and embedded browser assets.
 - `web/` owns the embedded browser interface.

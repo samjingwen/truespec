@@ -8,6 +8,7 @@ mod review;
 mod service;
 mod service_registry;
 mod source;
+mod tailnet;
 mod web;
 
 use std::{
@@ -52,6 +53,12 @@ enum Command {
     },
     /// Start the shared TrueSpec background service.
     Up {
+        /// Expose browser review routes privately through Tailscale Serve.
+        #[arg(long)]
+        tailnet: bool,
+        /// Dedicated Tailscale Serve HTTPS port.
+        #[arg(long, requires = "tailnet")]
+        tailnet_port: Option<u16>,
         /// Emit machine-readable status.
         #[arg(long)]
         json: bool,
@@ -162,7 +169,7 @@ fn main() -> Result<()> {
                 config_dir: integration::config_dir()?,
             };
             let plan = initialize::InitPlan::build(&root, &config, &integrations, &context, force)?;
-            let client = service::ServiceClient::open()?;
+            let mut client = service::ServiceClient::open()?;
             client.up()?;
             let changed = plan.apply()?;
             let state_reset = if reset_state {
@@ -170,7 +177,7 @@ fn main() -> Result<()> {
                     "Resetting local TrueSpec review state. Drafts, reviews, batches, replies, and connector bindings will be permanently deleted."
                 );
                 let maintenance = service::MaintenanceLock::acquire()?;
-                client.down()?;
+                client.pause_for_maintenance()?;
                 let reset = service::reset_stopped_workspace(&root, &maintenance);
                 drop(maintenance);
                 let reset = match reset {
@@ -208,8 +215,17 @@ fn main() -> Result<()> {
             println!("Workspace: {}", registered.workspace_id);
             Ok(())
         }
-        Command::Up { json } => {
-            let status = service::ServiceClient::open()?.up()?;
+        Command::Up {
+            tailnet,
+            tailnet_port,
+            json,
+        } => {
+            let mut client = service::ServiceClient::open()?;
+            let status = if tailnet {
+                client.up_tailnet(tailnet_port.unwrap_or(service::DEFAULT_TAILNET_PORT))?
+            } else {
+                client.up()?
+            };
             print_service_status(&status, json)
         }
         Command::Status { json } => {
@@ -217,7 +233,7 @@ fn main() -> Result<()> {
             print_service_status(&status, json)
         }
         Command::Down { json } => {
-            let client = service::ServiceClient::open()?;
+            let mut client = service::ServiceClient::open()?;
             let stopped = client.down()?;
             let status = client.status()?;
             if !json {
@@ -242,7 +258,7 @@ fn main() -> Result<()> {
         } => {
             ensure!(
                 protocol == PROTOCOL_VERSION,
-                "Unsupported connector protocol {protocol}; expected {PROTOCOL_VERSION}."
+                "Unsupported connector protocol {protocol}; expected {PROTOCOL_VERSION}. Refresh the installed integration. For OpenCode, run `truespec init --integration opencode --force`."
             );
             connector(root.as_deref(), command)
         }
@@ -272,6 +288,22 @@ fn print_service_status(status: &service::Status, json: bool) -> Result<()> {
     } else if matches!(status.state, "running" | "incompatible") {
         println!("Open reviews: unknown (workspace state is still loading)");
     }
+    if status.tailnet.enabled {
+        println!(
+            "Tailnet: {}",
+            if status.tailnet.verified {
+                "verified"
+            } else {
+                "unverified"
+            }
+        );
+        if let Some(origin) = &status.tailnet.origin {
+            println!("Tailnet origin: {origin}");
+        }
+        println!("Tailnet HTTPS port: {}", status.tailnet.https_port);
+    } else {
+        println!("Tailnet: disabled");
+    }
     if let Some(detail) = &status.detail {
         println!("Detail: {detail}");
     }
@@ -284,8 +316,8 @@ fn connector(root: Option<&std::path::Path>, command: ConnectorCommand) -> Resul
         let config = project::ProjectConfig::load(&root)?;
         config.adapter().open(&root, config.source_path())?;
     }
-    let client = service::ServiceClient::open()?;
-    client.up()?;
+    let mut client = service::ServiceClient::open()?;
+    client.ensure_up()?;
     let output = match command {
         ConnectorCommand::Attach {
             kind: name,

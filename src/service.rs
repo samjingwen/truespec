@@ -15,16 +15,21 @@ use reqwest::{
     blocking::{Client, RequestBuilder},
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use serde_json::Value;
 use subtle::ConstantTimeEq;
 use uuid::Uuid;
 
-use crate::service_registry::ProjectRegistry;
+use crate::{
+    service_registry::ProjectRegistry,
+    tailnet::{PublishResult, ServePort, TailnetClient},
+};
 
-pub const SERVICE_PROTOCOL: u8 = 1;
+pub const SERVICE_PROTOCOL: u8 = 2;
 pub const DEFAULT_PORT: u16 = 47_371;
 const FILE_LIMIT: u64 = 64 * 1024;
 const LOG_LIMIT: u64 = 1024 * 1024;
-const CONFIG_VERSION: u8 = 1;
+const CONFIG_VERSION: u8 = 2;
+pub const DEFAULT_TAILNET_PORT: u16 = 8443;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
 const START_TIMEOUT: Duration = Duration::from_secs(12);
 const STOP_TIMEOUT: Duration = Duration::from_secs(8);
@@ -143,6 +148,10 @@ impl ServicePaths {
         self.state_dir.join("service-maintenance.lock")
     }
 
+    fn lifecycle_lock(&self) -> PathBuf {
+        self.state_dir.join("service-lifecycle.lock")
+    }
+
     pub fn log(&self) -> PathBuf {
         self.state_dir.join("service.log")
     }
@@ -184,6 +193,7 @@ impl OwnerLock {
 }
 
 pub struct MaintenanceLock(File);
+struct LifecycleLock(File);
 
 pub struct ResetOutcome {
     pub reset: bool,
@@ -213,6 +223,19 @@ impl MaintenanceLock {
     }
 }
 
+impl LifecycleLock {
+    fn acquire(paths: &ServicePaths) -> Result<Self> {
+        paths.ensure()?;
+        let file = secure_open(&paths.lifecycle_lock(), true, false)?;
+        FileExt::lock_exclusive(&file).context("Cannot lock TrueSpec service lifecycle")?;
+        Ok(Self(file))
+    }
+
+    fn operation_guard(&self) -> &File {
+        &self.0
+    }
+}
+
 impl Drop for MaintenanceLock {
     fn drop(&mut self) {
         let _ = FileExt::unlock(&self.0);
@@ -225,9 +248,33 @@ impl Drop for OwnerLock {
     }
 }
 
+impl Drop for LifecycleLock {
+    fn drop(&mut self) {
+        let _ = FileExt::unlock(&self.0);
+    }
+}
+
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ServiceConfig {
+    version: u8,
+    port: u16,
+    token: String,
+    tailnet: TailnetConfig,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct TailnetConfig {
+    pub enabled: bool,
+    pub https_port: u16,
+    pub origin: Option<String>,
+    pub target: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LegacyServiceConfig {
     version: u8,
     port: u16,
     token: String,
@@ -237,9 +284,25 @@ impl ServiceConfig {
     pub fn load_or_create(paths: &ServicePaths) -> Result<Self> {
         paths.ensure()?;
         let path = paths.config();
-        match read_json(&path) {
-            Ok(config) => {
-                let config: Self = config;
+        match read_json::<Value>(&path) {
+            Ok(value) => {
+                let version = value
+                    .get("version")
+                    .and_then(Value::as_u64)
+                    .context("TrueSpec service configuration has no version")?;
+                if version == 1 {
+                    let legacy: LegacyServiceConfig = serde_json::from_value(value)?;
+                    ensure!(legacy.version == 1, "Invalid legacy service configuration");
+                    let config = Self {
+                        version: CONFIG_VERSION,
+                        port: legacy.port,
+                        token: legacy.token,
+                        tailnet: TailnetConfig::disabled(),
+                    };
+                    config.validate()?;
+                    return Ok(config);
+                }
+                let config: Self = serde_json::from_value(value)?;
                 config.validate()?;
                 Ok(config)
             }
@@ -268,6 +331,7 @@ impl ServiceConfig {
                         .map(|byte| format!("{byte:02x}"))
                         .collect::<Vec<_>>()
                         .join(""),
+                    tailnet: TailnetConfig::disabled(),
                 };
                 config.validate()?;
                 create_json(&path, &config)?;
@@ -283,6 +347,20 @@ impl ServiceConfig {
         self.port
     }
 
+    pub fn tailnet(&self) -> &TailnetConfig {
+        &self.tailnet
+    }
+
+    fn save_tailnet(&self, paths: &ServicePaths, tailnet: TailnetConfig) -> Result<Self> {
+        let config = Self {
+            tailnet,
+            ..self.clone()
+        };
+        config.validate()?;
+        write_json(&paths.config(), &config)?;
+        Ok(config)
+    }
+
     fn validate(&self) -> Result<()> {
         ensure!(
             self.version == CONFIG_VERSION,
@@ -292,6 +370,71 @@ impl ServiceConfig {
         ensure!(
             self.token.len() == 64 && self.token.bytes().all(|byte| byte.is_ascii_hexdigit()),
             "Invalid TrueSpec service credential"
+        );
+        self.tailnet.validate()?;
+        if self.tailnet.enabled {
+            let target = reqwest::Url::parse(self.tailnet.target.as_deref().unwrap())?;
+            ensure!(
+                target.port() == Some(self.port),
+                "Tailnet target must match the configured TrueSpec service port"
+            );
+        }
+        Ok(())
+    }
+}
+
+impl TailnetConfig {
+    fn disabled() -> Self {
+        Self {
+            enabled: false,
+            https_port: DEFAULT_TAILNET_PORT,
+            origin: None,
+            target: None,
+        }
+    }
+
+    fn validate(&self) -> Result<()> {
+        ensure!(self.https_port > 0, "Invalid tailnet HTTPS port");
+        if !self.enabled {
+            ensure!(
+                self.origin.is_none() && self.target.is_none(),
+                "Disabled tailnet mode must not publish an origin or target"
+            );
+            return Ok(());
+        }
+        let origin = self
+            .origin
+            .as_deref()
+            .context("Enabled tailnet mode requires an HTTPS origin")?;
+        let origin = reqwest::Url::parse(origin)?;
+        ensure!(
+            origin.scheme() == "https"
+                && origin.path() == "/"
+                && origin.query().is_none()
+                && origin.fragment().is_none()
+                && origin.username().is_empty()
+                && origin.password().is_none()
+                && origin.port_or_known_default() == Some(self.https_port)
+                && origin
+                    .host_str()
+                    .is_some_and(|host| host.ends_with(".ts.net")),
+            "Invalid tailnet HTTPS origin"
+        );
+        let target = self
+            .target
+            .as_deref()
+            .context("Enabled tailnet mode requires a loopback target")?;
+        let target = reqwest::Url::parse(target)?;
+        ensure!(
+            target.scheme() == "http"
+                && target.host_str() == Some("127.0.0.1")
+                && target.port().is_some()
+                && target.path() == "/"
+                && target.query().is_none()
+                && target.fragment().is_none()
+                && target.username().is_empty()
+                && target.password().is_none(),
+            "Invalid tailnet loopback target"
         );
         Ok(())
     }
@@ -418,8 +561,36 @@ pub struct Status {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub projects: Option<u64>,
     pub open_reviews: Option<u64>,
+    pub tailnet: TailnetStatus,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct TailnetStatus {
+    pub enabled: bool,
+    pub https_port: u16,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub origin: Option<String>,
+    pub verified: bool,
+}
+
+impl TailnetStatus {
+    fn disabled(https_port: u16) -> Self {
+        Self {
+            enabled: false,
+            https_port,
+            origin: None,
+            verified: false,
+        }
+    }
+}
+
+struct TailnetTransition<'a> {
+    client: &'a TailnetClient,
+    dns_name: &'a str,
+    https_port: u16,
+    target: &'a str,
 }
 
 pub enum Probe {
@@ -441,6 +612,37 @@ pub struct ServiceClient {
     http: Client,
 }
 
+struct ContenderGuard {
+    child: Option<Child>,
+}
+
+impl ContenderGuard {
+    fn new(child: Child) -> Self {
+        Self { child: Some(child) }
+    }
+
+    fn try_wait(&mut self) -> Result<Option<std::process::ExitStatus>> {
+        self.child
+            .as_mut()
+            .context("TrueSpec service contender is unavailable")?
+            .try_wait()
+            .context("Cannot inspect TrueSpec service contender")
+    }
+
+    fn release(&mut self) -> Option<Child> {
+        self.child.take()
+    }
+}
+
+impl Drop for ContenderGuard {
+    fn drop(&mut self) {
+        if let Some(mut child) = self.child.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
 impl ServiceClient {
     pub fn open() -> Result<Self> {
         Self::with_paths(ServicePaths::resolve()?)
@@ -460,7 +662,7 @@ impl ServiceClient {
     }
 
     pub fn probe(&self) -> Result<Probe> {
-        let Some(registration) = Registration::read(&self.paths)? else {
+        let Some(mut registration) = Registration::read(&self.paths)? else {
             return Ok(if OwnerLock::is_held(&self.paths)? {
                 Probe::Publishing
             } else if endpoint_occupied(self.config.port) {
@@ -515,12 +717,13 @@ impl ServiceClient {
         } else if health.state != "ready" {
             Ok(Probe::Unresponsive(registration))
         } else {
+            registration.state = RegistrationState::Ready;
             Ok(Probe::Ready(registration, health))
         }
     }
 
     pub fn status(&self) -> Result<Status> {
-        Ok(match self.probe()? {
+        let mut status = match self.probe()? {
             Probe::Ready(registration, health) => {
                 Status {
                     state: "running",
@@ -529,6 +732,7 @@ impl ServiceClient {
                     endpoint: Some(registration.url),
                     projects: Some(health.projects),
                     open_reviews: health.open_reviews,
+                    tailnet: TailnetStatus::disabled(self.config.tailnet.https_port),
                     detail: None,
                 }
             }
@@ -544,6 +748,7 @@ impl ServiceClient {
                 endpoint: None,
                 projects: None,
                 open_reviews: None,
+                tailnet: TailnetStatus::disabled(self.config.tailnet.https_port),
                 detail: Some(
                     "A TrueSpec owner is publishing authenticated service registration.".into(),
                 ),
@@ -560,6 +765,7 @@ impl ServiceClient {
                 endpoint: Some(registration.url),
                 projects: Some(health.projects),
                 open_reviews: health.open_reviews,
+                tailnet: TailnetStatus::disabled(self.config.tailnet.https_port),
                 detail: Some("Run `truespec down` with the matching binary, then `truespec up`.".into()),
             },
             Probe::Unresponsive(registration) => Status {
@@ -569,6 +775,7 @@ impl ServiceClient {
                 endpoint: Some(registration.url),
                 projects: None,
                 open_reviews: None,
+                tailnet: TailnetStatus::disabled(self.config.tailnet.https_port),
                 detail: Some("The registered service did not answer authenticated health checks.".into()),
             },
             Probe::TimedOut(registration) => status_from_registration(
@@ -588,6 +795,7 @@ impl ServiceClient {
                 endpoint: Some(endpoint),
                 projects: None,
                 open_reviews: None,
+                tailnet: TailnetStatus::disabled(self.config.tailnet.https_port),
                 detail: Some(
                     "The configured endpoint is occupied by an unverified process. TrueSpec left it untouched."
                         .into(),
@@ -600,14 +808,184 @@ impl ServiceClient {
                 endpoint: None,
                 projects: Some(0),
                 open_reviews: Some(0),
+                tailnet: TailnetStatus::disabled(self.config.tailnet.https_port),
                 detail: None,
             },
-        })
+        };
+        status.tailnet = self.tailnet_status();
+        Ok(status)
     }
 
-    pub fn up(&self) -> Result<Status> {
+    pub fn up(&mut self) -> Result<Status> {
+        let _lifecycle = LifecycleLock::acquire(&self.paths)?;
+        self.config = ServiceConfig::load_or_create(&self.paths)?;
+        drop(self.up_local()?);
+        self.reconcile_tailnet(&_lifecycle)?;
+        self.status()
+    }
+
+    pub fn ensure_up(&mut self) -> Result<()> {
+        if matches!(self.probe()?, Probe::Ready(_, _)) {
+            return Ok(());
+        }
+        let _lifecycle = LifecycleLock::acquire(&self.paths)?;
+        self.config = ServiceConfig::load_or_create(&self.paths)?;
+        self.up_local().map(drop)
+    }
+
+    pub fn up_tailnet(&mut self, https_port: u16) -> Result<Status> {
+        let _lifecycle = LifecycleLock::acquire(&self.paths)?;
+        self.config = ServiceConfig::load_or_create(&self.paths)?;
+        ensure!(
+            https_port > 0,
+            "Tailnet HTTPS port must be between 1 and 65535"
+        );
+        ensure!(
+            self.config.port > 0,
+            "Tailnet mode requires a fixed TrueSpec service port"
+        );
+        if self.config.tailnet.enabled {
+            ensure!(
+                self.config.tailnet.https_port == https_port,
+                "TrueSpec already owns tailnet HTTPS port {}; run `truespec down` before choosing another port",
+                self.config.tailnet.https_port
+            );
+            drop(self.up_local()?);
+            self.reconcile_tailnet(&_lifecycle)?;
+            return self.status();
+        }
+
+        let tailnet =
+            TailnetClient::discover().with_operation_guard(_lifecycle.operation_guard())?;
+        let device = tailnet.device()?;
+        let origin = TailnetClient::origin(&device, https_port);
+        let target = configured_endpoint(self.config.port);
+        match tailnet.serve_port(&device.dns_name, https_port, &target)? {
+            ServePort::Free => {}
+            ServePort::Matching | ServePort::Occupied => bail!(
+                "Tailscale Serve HTTPS port {https_port} is already configured and is not owned by TrueSpec"
+            ),
+        }
+        let was_running = matches!(self.probe()?, Probe::Ready(_, _));
+        self.down_local()?;
+        let previous = self.config.clone();
+        let enabled = TailnetConfig {
+            enabled: true,
+            https_port,
+            origin: Some(origin),
+            target: Some(target.clone()),
+        };
+        self.config = match self.config.save_tailnet(&self.paths, enabled) {
+            Ok(config) => config,
+            Err(error) => {
+                if was_running && let Err(rollback) = self.up_local() {
+                    return Err(error.context(format!(
+                        "Cannot save tailnet ownership, and local-mode restart failed: {rollback:#}"
+                    )));
+                }
+                return Err(error);
+            }
+        };
+        let mut started = match self.up_local() {
+            Ok(started) => started,
+            Err(error) => {
+                self.config = match previous.save_tailnet(&self.paths, previous.tailnet.clone()) {
+                    Ok(config) => config,
+                    Err(rollback) => {
+                        return Err(error.context(format!(
+                            "Cannot start TrueSpec with tailnet browser trust, and local configuration rollback failed: {rollback:#}"
+                        )));
+                    }
+                };
+                if was_running && let Err(rollback) = self.up_local() {
+                    return Err(error.context(format!(
+                        "Cannot start TrueSpec with tailnet browser trust, and local-mode restart failed: {rollback:#}"
+                    )));
+                }
+                return Err(error.context("Cannot start TrueSpec with tailnet browser trust"));
+            }
+        };
+        match tailnet.publish_if_free(&device.dns_name, https_port, &target) {
+            Ok(PublishResult::Published) => {}
+            Ok(PublishResult::BecameOccupied) => {
+                self.rollback_tailnet_policy(&previous, was_running, &mut started)
+                    .context("Cannot restore local mode after the Serve port changed ownership")?;
+                bail!(
+                    "Tailscale Serve HTTPS port {https_port} changed ownership during setup; previous local mode was restored"
+                );
+            }
+            Err(error) => {
+                let transition = TailnetTransition {
+                    client: &tailnet,
+                    dns_name: &device.dns_name,
+                    https_port,
+                    target: &target,
+                };
+                if let Err(rollback) =
+                    self.rollback_tailnet_enable(&previous, was_running, &transition, &mut started)
+                {
+                    return Err(error.context(format!(
+                        "Tailscale Serve setup failed, and rollback did not complete: {rollback:#}"
+                    )));
+                }
+                return Err(
+                    error.context("Tailscale Serve setup failed; previous local mode was restored")
+                );
+            }
+        }
+        if let Err(error) = self.reconcile_tailnet(&_lifecycle) {
+            let transition = TailnetTransition {
+                client: &tailnet,
+                dns_name: &device.dns_name,
+                https_port,
+                target: &target,
+            };
+            if let Err(rollback) =
+                self.rollback_tailnet_enable(&previous, was_running, &transition, &mut started)
+            {
+                return Err(error.context(format!(
+                    "Tailnet browser readiness failed, and rollback did not complete: {rollback:#}"
+                )));
+            }
+            return Err(
+                error.context("Tailnet browser readiness failed; previous local mode was restored")
+            );
+        }
+        self.status()
+    }
+
+    fn rollback_tailnet_enable(
+        &mut self,
+        previous: &ServiceConfig,
+        was_running: bool,
+        transition: &TailnetTransition<'_>,
+        started: &mut Option<Child>,
+    ) -> Result<()> {
+        transition.client.disable(
+            transition.dns_name,
+            transition.https_port,
+            transition.target,
+        )?;
+        self.rollback_tailnet_policy(previous, was_running, started)
+    }
+
+    fn rollback_tailnet_policy(
+        &mut self,
+        previous: &ServiceConfig,
+        was_running: bool,
+        started: &mut Option<Child>,
+    ) -> Result<()> {
+        self.down_local_owned(started.as_mut())?;
+        self.config = previous.save_tailnet(&self.paths, previous.tailnet.clone())?;
+        if was_running {
+            drop(self.up_local()?);
+        }
+        Ok(())
+    }
+
+    fn up_local(&self) -> Result<Option<Child>> {
         match self.probe()? {
-            Probe::Ready(_, _) => return self.status(),
+            Probe::Ready(_, _) => return Ok(None),
             Probe::Incompatible(_, _) => {
                 bail!(
                     "A different TrueSpec version is running. Stop it with its matching binary before starting {}.",
@@ -643,17 +1021,87 @@ impl ServiceClient {
         self.wait_for_ready(Some(child), None)
     }
 
+    fn ready_registration(&self) -> Result<Registration> {
+        match self.probe()? {
+            Probe::Ready(registration, _) => Ok(registration),
+            _ => bail!("TrueSpec service is not ready"),
+        }
+    }
+
+    fn reconcile_tailnet(&self, lifecycle: &LifecycleLock) -> Result<()> {
+        if !self.config.tailnet.enabled {
+            return Ok(());
+        }
+        let origin = self
+            .config
+            .tailnet
+            .origin
+            .as_deref()
+            .context("Tailnet mode has no HTTPS origin")?;
+        let target = self
+            .config
+            .tailnet
+            .target
+            .as_deref()
+            .context("Tailnet mode has no loopback target")?;
+        let registration = self.ready_registration()?;
+        ensure!(
+            registration.url == target,
+            "The running TrueSpec endpoint no longer matches its owned tailnet proxy target"
+        );
+        let client = TailnetClient::discover().with_operation_guard(lifecycle.operation_guard())?;
+        let device = client.device()?;
+        ensure!(
+            TailnetClient::origin(&device, self.config.tailnet.https_port) == origin,
+            "The current Tailscale DNS name no longer matches TrueSpec's owned tailnet origin"
+        );
+        client.enable(&device.dns_name, self.config.tailnet.https_port, target)?;
+        client.verify_browser(origin)
+    }
+
+    fn tailnet_status(&self) -> TailnetStatus {
+        let config = &self.config.tailnet;
+        if !config.enabled {
+            return TailnetStatus::disabled(config.https_port);
+        }
+        let verified = (|| -> Result<bool> {
+            let origin = config
+                .origin
+                .as_deref()
+                .context("Tailnet origin is missing")?;
+            let target = config
+                .target
+                .as_deref()
+                .context("Tailnet target is missing")?;
+            let client = TailnetClient::discover();
+            let device = client.device()?;
+            Ok(TailnetClient::origin(&device, config.https_port) == origin
+                && client.serve_port(&device.dns_name, config.https_port, target)?
+                    == ServePort::Matching)
+        })()
+        .unwrap_or(false);
+        TailnetStatus {
+            enabled: true,
+            https_port: config.https_port,
+            origin: config.origin.clone(),
+            verified,
+        }
+    }
+
     fn wait_for_ready(
         &self,
-        mut contender: Option<Child>,
+        contender: Option<Child>,
         expected: Option<Registration>,
-    ) -> Result<Status> {
+    ) -> Result<Option<Child>> {
+        let mut contender = contender.map(ContenderGuard::new);
         let deadline = Instant::now() + START_TIMEOUT;
         let mut retries = 0_u8;
         let mut retry_after = Instant::now() + Duration::from_millis(500);
         loop {
             let stopped = match self.probe()? {
-                Probe::Ready(_, _) => return self.status(),
+                Probe::Ready(_, _) => {
+                    return Ok(contender.as_mut().and_then(ContenderGuard::release));
+                }
                 Probe::Incompatible(_, _) => {
                     bail!("A newly discovered TrueSpec service is incompatible")
                 }
@@ -689,7 +1137,7 @@ impl ServiceClient {
                 && retries < 2
                 && Instant::now() >= retry_after
             {
-                contender = Some(self.spawn_contender()?);
+                contender = Some(ContenderGuard::new(self.spawn_contender()?));
                 retries += 1;
                 retry_after = Instant::now() + Duration::from_millis(500);
             }
@@ -702,7 +1150,67 @@ impl ServiceClient {
         }
     }
 
-    pub fn down(&self) -> Result<bool> {
+    pub fn down(&mut self) -> Result<bool> {
+        let _lifecycle = LifecycleLock::acquire(&self.paths)?;
+        self.config = ServiceConfig::load_or_create(&self.paths)?;
+        let tailnet = (|| -> Result<Option<(TailnetClient, String, String)>> {
+            if !self.config.tailnet.enabled {
+                return Ok(None);
+            }
+            let origin = self
+                .config
+                .tailnet
+                .origin
+                .as_deref()
+                .context("Tailnet mode has no HTTPS origin")?;
+            let target = self
+                .config
+                .tailnet
+                .target
+                .as_deref()
+                .context("Tailnet mode has no loopback target")?;
+            let client =
+                TailnetClient::discover().with_operation_guard(_lifecycle.operation_guard())?;
+            let device = client.device()?;
+            ensure!(
+                TailnetClient::origin(&device, self.config.tailnet.https_port) == origin,
+                "The current Tailscale DNS name no longer matches TrueSpec's owned tailnet origin"
+            );
+            ensure!(
+                client.serve_port(&device.dns_name, self.config.tailnet.https_port, target)?
+                    != ServePort::Occupied,
+                "Tailscale Serve HTTPS port {} no longer matches TrueSpec",
+                self.config.tailnet.https_port
+            );
+            Ok(Some((client, device.dns_name, target.to_owned())))
+        })();
+        let stopped = self.down_local()?;
+        let tailnet = tailnet.with_context(|| {
+            format!(
+                "The local TrueSpec service was stopped, but Serve cleanup could not be verified. Inspect it before running `tailscale serve --https={} off`",
+                self.config.tailnet.https_port
+            )
+        })?;
+        if let Some((client, dns_name, target)) = tailnet {
+            client.disable(&dns_name, self.config.tailnet.https_port, &target)?;
+            self.config = self
+                .config
+                .save_tailnet(&self.paths, TailnetConfig::disabled())?;
+        }
+        Ok(stopped)
+    }
+
+    pub fn pause_for_maintenance(&mut self) -> Result<bool> {
+        let _lifecycle = LifecycleLock::acquire(&self.paths)?;
+        self.config = ServiceConfig::load_or_create(&self.paths)?;
+        self.down_local()
+    }
+
+    fn down_local(&self) -> Result<bool> {
+        self.down_local_owned(None)
+    }
+
+    fn down_local_owned(&self, mut owned: Option<&mut Child>) -> Result<bool> {
         let registration = match self.probe()? {
             Probe::Stopped => return Ok(false),
             Probe::Ready(registration, _) => registration,
@@ -735,7 +1243,12 @@ impl ServiceClient {
             .send()
             .context("Cannot request TrueSpec service shutdown")?;
         require_success(response)?;
-        wait_for_exit(&registration, &self.paths, STOP_TIMEOUT)?;
+        wait_for_exit(
+            &registration,
+            &self.paths,
+            STOP_TIMEOUT,
+            owned.as_deref_mut(),
+        )?;
         if process_alive(registration.pid) {
             ensure_current_owner(&registration, &self.paths)?;
             ensure!(
@@ -743,7 +1256,12 @@ impl ServiceClient {
                 "The registered PID no longer belongs to this TrueSpec executable; refusing to signal it"
             );
             signal(registration.pid, nix::sys::signal::Signal::SIGTERM)?;
-            wait_for_exit(&registration, &self.paths, Duration::from_secs(3))?;
+            wait_for_exit(
+                &registration,
+                &self.paths,
+                Duration::from_secs(3),
+                owned.as_deref_mut(),
+            )?;
         }
         if process_alive(registration.pid) {
             ensure_current_owner(&registration, &self.paths)?;
@@ -752,7 +1270,7 @@ impl ServiceClient {
                 "The registered PID changed ownership during shutdown; refusing to escalate"
             );
             signal(registration.pid, nix::sys::signal::Signal::SIGKILL)?;
-            wait_for_exit(&registration, &self.paths, Duration::from_secs(2))?;
+            wait_for_exit(&registration, &self.paths, Duration::from_secs(2), owned)?;
         }
         ensure!(
             !process_alive(registration.pid),
@@ -803,7 +1321,10 @@ impl ServiceClient {
             .context("TrueSpec service returned invalid workspace resolution")
     }
 
-    pub fn attach(&self, request: &AttachRequest) -> Result<AttachResponse> {
+    pub fn attach(&mut self, request: &AttachRequest) -> Result<AttachResponse> {
+        let _lifecycle = LifecycleLock::acquire(&self.paths)?;
+        self.config = ServiceConfig::load_or_create(&self.paths)?;
+        self.reconcile_tailnet(&_lifecycle)?;
         self.post("__control/connectors/attach", request)?
             .json()
             .context("TrueSpec service returned invalid connector attachment")
@@ -938,6 +1459,9 @@ pub struct AttachResponse {
     pub connection_id: String,
     pub review_id: String,
     pub url: String,
+    pub local_url: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tailnet_origin: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -1177,6 +1701,7 @@ fn status_from_registration(
         endpoint: Some(registration.url),
         projects: None,
         open_reviews: None,
+        tailnet: TailnetStatus::disabled(DEFAULT_TAILNET_PORT),
         detail: Some(detail.into()),
     }
 }
@@ -1206,9 +1731,18 @@ fn wait_for_exit(
     registration: &Registration,
     paths: &ServicePaths,
     timeout: Duration,
+    mut owned: Option<&mut Child>,
 ) -> Result<()> {
     let deadline = Instant::now() + timeout;
-    while process_alive(registration.pid) && Instant::now() < deadline {
+    while Instant::now() < deadline {
+        if let Some(child) = owned.as_mut()
+            && child.try_wait()?.is_some()
+        {
+            return Ok(());
+        }
+        if !process_alive(registration.pid) {
+            return Ok(());
+        }
         ensure_not_replaced(registration, paths)?;
         thread::sleep(POLL_INTERVAL);
     }
@@ -1467,6 +2001,7 @@ mod tests {
             version: CONFIG_VERSION,
             port,
             token: "a".repeat(64),
+            tailnet: TailnetConfig::disabled(),
         };
         write_json(&paths.config(), &config).unwrap();
         config
@@ -1514,6 +2049,8 @@ mod tests {
         let paths = paths(fixture.path());
         let config = ServiceConfig::load_or_create(&paths).unwrap();
         assert_eq!(config.port(), DEFAULT_PORT);
+        assert_eq!(config.version, 2);
+        assert_eq!(config.tailnet, TailnetConfig::disabled());
         assert_eq!(
             ServiceConfig::load_or_create(&paths).unwrap().token,
             config.token
@@ -1538,6 +2075,32 @@ mod tests {
                 0o700
             );
         }
+    }
+
+    #[test]
+    fn loads_v1_config_without_stranding_a_running_legacy_owner() {
+        let fixture = tempfile::tempdir().unwrap();
+        let paths = paths(fixture.path());
+        paths.ensure().unwrap();
+        write_json(
+            &paths.config(),
+            &serde_json::json!({
+                "version": 1,
+                "port": 47371,
+                "token": "a".repeat(64)
+            }),
+        )
+        .unwrap();
+        let config = ServiceConfig::load_or_create(&paths).unwrap();
+        assert_eq!(config.version, 2);
+        assert_eq!(config.port, 47371);
+        assert_eq!(config.token, "a".repeat(64));
+        assert_eq!(config.tailnet, TailnetConfig::disabled());
+        let serialized = fs::read_to_string(paths.config()).unwrap();
+        assert!(serialized.contains("\"version\": 1"));
+        assert!(!serialized.contains("\"tailnet\""));
+        assert!(!serialized.contains("Tailscale-User"));
+        assert!(!serialized.contains("reviewer@"));
     }
 
     #[test]
@@ -1739,6 +2302,7 @@ mod tests {
             endpoint: Some("http://127.0.0.1:1/".into()),
             projects: Some(1),
             open_reviews: None,
+            tailnet: TailnetStatus::disabled(DEFAULT_TAILNET_PORT),
             detail: None,
         };
         let value = serde_json::to_value(status).unwrap();
@@ -1761,6 +2325,15 @@ mod tests {
     #[test]
     fn recognizes_the_current_executable_before_process_escalation() {
         assert!(process_is_current_executable(std::process::id()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unverified_contender_is_killed_and_reaped_on_error() {
+        let child = Command::new("/bin/sleep").arg("30").spawn().unwrap();
+        let pid = child.id();
+        drop(ContenderGuard::new(child));
+        assert!(!process_alive(pid));
     }
 
     #[test]
@@ -1932,7 +2505,7 @@ mod tests {
                 }
             }
         });
-        let client = ServiceClient::with_paths(paths.clone()).unwrap();
+        let mut client = ServiceClient::with_paths(paths.clone()).unwrap();
         let error = client.down().unwrap_err().to_string();
         assert!(error.contains("registration changed"));
         assert_eq!(Registration::read(&paths).unwrap(), Some(replacement));
