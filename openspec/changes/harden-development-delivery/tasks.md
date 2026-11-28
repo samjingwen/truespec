@@ -12,7 +12,7 @@
 
 ## 3. Review and protect delivery
 
-- [ ] 3.1 Review the complete base-to-head diff with Hardlook, address every accepted finding, rerun invalidated checks, and record any remaining limitation.
+- [x] 3.1 Review the complete base-to-head diff with Hardlook, address every accepted finding, rerun invalidated checks, and record any remaining limitation.
 - [ ] 3.2 Push the branch and open the bootstrap pull request; verify both required GitHub checks pass for the exact reviewed head.
 - [ ] 3.3 Apply classic `master` protection after both contexts exist and verify through the GitHub API that pull requests, strict checks, administrator enforcement, conversation resolution, force-push prevention, and deletion prevention match the approved design.
 
