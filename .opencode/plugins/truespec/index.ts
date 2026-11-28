@@ -319,12 +319,12 @@ export default Plugin.define({
           }
           await changeBindings(known => [...known.filter(item => item.connection_id !== binding.connection_id), binding]);
           bridge(binding);
-          const reviewURLs = url.href === local.href ? [local.href] : [url.href, local.href];
-          const reviewText = reviewURLs.join("\n");
-          await ctx.session.synthetic({
+          const reviewText = url.href === local.href
+            ? `[Local](${local.href})`
+            : `[Tailnet](${url.href}) · [Local](${local.href})`;
+          await ctx.session.prompt({
             sessionID,
             text: reviewText,
-            description: reviewText,
             resume: false,
           });
         },
