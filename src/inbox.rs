@@ -10,7 +10,7 @@ use serde::Serialize;
 use crate::review::{BatchItem, Problem, Store, conflict, new_id, now, validate_connector_text};
 
 const LEASE_MS: i64 = 5 * 60 * 1000;
-pub const PROTOCOL_VERSION: u8 = 1;
+pub const PROTOCOL_VERSION: u8 = 2;
 
 pub struct LocalInbox(pub Store);
 
@@ -65,9 +65,14 @@ impl Envelope {
 }
 
 impl LocalInbox {
-    pub fn poll_connector(&self, connection: &str, wait: Duration) -> Result<Envelope> {
+    pub fn poll_connector_until(
+        &self,
+        connection: &str,
+        wait: Duration,
+        canceled: impl Fn() -> bool,
+    ) -> Result<Envelope> {
         let session = self.0.connector_review(connection)?;
-        self.wait_for(&session, Some(connection), wait)
+        self.wait_for(&session, Some(connection), wait, canceled)
     }
 
     pub fn delivered(
@@ -133,11 +138,12 @@ impl LocalInbox {
         session: &str,
         connection: Option<&str>,
         wait: Duration,
+        canceled: impl Fn() -> bool,
     ) -> Result<Envelope> {
         let started = Instant::now();
         loop {
             let result = self.claim_for(session, connection, now)?;
-            if !matches!(result.outcome, Outcome::Idle) || started.elapsed() >= wait {
+            if !matches!(result.outcome, Outcome::Idle) || started.elapsed() >= wait || canceled() {
                 return Ok(result);
             }
             thread::sleep(Duration::from_millis(200).min(wait.saturating_sub(started.elapsed())));

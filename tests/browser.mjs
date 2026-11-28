@@ -1,11 +1,9 @@
 import assert from "node:assert/strict";
-import { spawn, spawnSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { once } from "node:events";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { createInterface } from "node:readline";
 
 const cli = resolve(process.env.TRUESPEC_BIN || "target/debug/truespec");
 const chromeEnv = {
@@ -76,7 +74,10 @@ function script(input) {
 }
 
 async function viewerApi(viewer, path, body, expected = 200) {
-  const response = await fetch(new URL(path, viewer.url), body === undefined ? {} : {
+  const scoped = path.startsWith("/api/")
+    ? `/api/workspaces/${encodeURIComponent(viewer.workspace)}` + path.slice(4)
+    : path;
+  const response = await fetch(new URL(scoped, viewer.url), body === undefined ? {} : {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -89,7 +90,21 @@ async function viewerApi(viewer, path, body, expected = 200) {
   return text ? JSON.parse(text) : null;
 }
 
-async function start(root, mode) {
+function testEnv(root) {
+  const service = join(root, ".truespec-service");
+  return {
+    ...process.env,
+    HOME: join(service, "home"),
+    XDG_CONFIG_HOME: join(service, "config"),
+    XDG_STATE_HOME: join(service, "state"),
+    XDG_DATA_HOME: join(service, "data"),
+    TRUESPEC_SERVICE_PORT: "0",
+    PATH: "",
+  };
+}
+
+async function start(root, mode, env = testEnv(root)) {
+  await mkdir(join(root, ".git"), { recursive: true });
   await mkdir(join(root, "truespec/config"), { recursive: true });
   await writeFile(join(root, "truespec/config/project.json"), JSON.stringify({
     version: 1,
@@ -98,30 +113,43 @@ async function start(root, mode) {
       path: mode === "openspec" ? "openspec" : "docs",
     },
   }, null, 2) + "\n");
-  const child = spawn(cli, ["connector", "--protocol", "1", "serve"], {
-    cwd: root, env: { ...process.env, PATH: "" }, stdio: ["ignore", "pipe", "inherit"],
-  });
-  const stream = createInterface({ input: child.stdout });
+  let output;
   try {
-    const lines = stream[Symbol.asyncIterator]();
-    const url = (await lines.next()).value?.match(/http:\/\/127\.0\.0\.1:\d+\//)?.[0];
-    const review = (await lines.next()).value?.match(/^Review: (.*)$/)?.[1];
-    assert.ok(url && review, "Viewer should report its loopback URL and review ID");
-    return { child, url, review };
+    output = call(cli, ["up", "--json"], { cwd: root, env });
   } catch (error) {
-    child.kill();
-    throw error;
-  } finally {
-    stream.close();
+    const log = await readFile(join(env.XDG_STATE_HOME, "truespec/service.log"), "utf8")
+      .catch(() => "");
+    throw new Error(`${error instanceof Error ? error.message : error}\n${log.slice(-8_000)}`);
   }
+  const service = JSON.parse(output);
+  assert.equal(service.state, "running");
+  return { env, origin: service.endpoint };
 }
 
 async function stop(viewer) {
-  if (!viewer || viewer.child.exitCode !== null || viewer.child.signalCode !== null) return;
-  const exit = once(viewer.child, "exit");
-  viewer.child.kill("SIGTERM");
-  const [code] = await exit;
-  assert.equal(code, 0);
+  if (!viewer) return;
+  call(cli, ["down", "--json"], { env: viewer.env });
+}
+
+function pairedViewer(service, binding) {
+  return {
+    ...service,
+    workspace: binding.workspace_id,
+    review: binding.review_id,
+    url: binding.url,
+  };
+}
+
+function restoredViewer(service, previous) {
+  return {
+    ...service,
+    workspace: previous.workspace,
+    review: previous.review,
+    url: new URL(
+      `w/${encodeURIComponent(previous.workspace)}/?review=${encodeURIComponent(previous.review)}`,
+      service.origin,
+    ).href,
+  };
 }
 
 async function fixture(root, mode) {
@@ -194,16 +222,17 @@ This follows the list.
 }
 
 async function exercise(mode, width) {
-  const root = await mkdtemp(join(tmpdir(), `truespec-${mode}-`));
+  const root = await realpath(await mkdtemp(join(tmpdir(), `truespec-${mode}-`)));
   let viewer;
   try {
     const { first, second, source } = await fixture(root, mode);
     viewer = await start(root, mode);
-    const run = (...args) => call(cli, args, { cwd: root, env: { ...process.env, PATH: "" } });
+    const run = (...args) => call(cli, args, { cwd: root, env: viewer.env });
     const binding = JSON.parse(run(
       "connector", "attach", "--kind", "browser-test",
       "--destination", `browser-${mode}`, "--label", "Browser Test",
     ));
+    viewer = pairedViewer(viewer, binding);
     chrome(["open", viewer.url]);
     if (width < 500) chrome(["emulate", "--viewport", `${width}x880x1,mobile`]);
     else chrome(["resize", String(width), "880"]);
@@ -689,6 +718,11 @@ async function exercise(mode, width) {
       });
       await page.wait(100);
       check(await page.eval(() => document.querySelector("#line-outline").hidden), "Annotation off hides hover outlines");
+      const durableLink = await page.eval(() => {
+        const link = document.querySelector("#article a");
+        return { href: link.href, scoped: new URL(link.href).pathname === location.pathname };
+      });
+      check(durableLink.scoped, "Rendered document links preserve the workspace pathname");
       await page.click("#article a");
       await page.wait("#article:not([hidden]) #timing");
       await page.back();
@@ -696,6 +730,12 @@ async function exercise(mode, width) {
       await page.click("#annotation-toggle");
       check(await page.eval(() => document.querySelector("#annotation-toggle").getAttribute("aria-checked") === "true"),
         "Annotation can be enabled again after following a Markdown link");
+      await page.open(durableLink.href);
+      await page.wait("#article:not([hidden]) #timing");
+      check(await page.eval(() => location.pathname.startsWith("/w/")),
+        "Direct document-link navigation retains workspace scope");
+      await page.open(${JSON.stringify(viewer.url)});
+      await page.wait("#article:not([hidden]) #login");
       await page.eval(() => {
         const word = document.querySelector("#login + p strong [data-run]");
         const rect = word.getClientRects()[0];
@@ -948,10 +988,10 @@ async function exercise(mode, width) {
       await page.wait("#layout[data-review-expanded='true']");
     `);
     if (screenshots) chrome(["screenshot", join(screenshots, `truespec-${mode}-expanded-review.png`)]);
-    const previous = viewer.review;
+    const previous = { workspace: viewer.workspace, review: viewer.review };
     await stop(viewer);
-    viewer = await start(root, mode);
-    assert.equal(viewer.review, previous);
+    viewer = restoredViewer(await start(root, mode), previous);
+    assert.equal(viewer.review, previous.review);
     script(`
       await page.open(${JSON.stringify(viewer.url)});
       await page.wait("#layout[data-review-expanded='false']");
@@ -1091,7 +1131,7 @@ async function exercise(mode, width) {
     }
     assert.equal(poll().event, "ended");
 
-    viewer = await start(root, mode);
+    viewer = restoredViewer(await start(root, mode), previous);
     script(`
       await page.open(${JSON.stringify(viewer.url)});
       await showPanel("review");
@@ -1111,16 +1151,17 @@ async function exercise(mode, width) {
 }
 
 async function verifyPendingGeneralSubmission() {
-  const root = await mkdtemp(join(tmpdir(), "truespec-general-send-"));
+  const root = await realpath(await mkdtemp(join(tmpdir(), "truespec-general-send-")));
   let viewer;
   try {
     await fixture(root, "openspec");
     viewer = await start(root, "openspec");
-    const run = (...args) => call(cli, args, { cwd: root, env: { ...process.env, PATH: "" } });
+    const run = (...args) => call(cli, args, { cwd: root, env: viewer.env });
     const binding = JSON.parse(run(
       "connector", "attach", "--kind", "browser-test",
       "--destination", "general-send-chat", "--label", "Browser Test",
     ));
+    viewer = pairedViewer(viewer, binding);
     chrome(["open", viewer.url]);
     chrome(["emulate", "--viewport", "1200x800x1"]);
     script(`
@@ -1221,16 +1262,17 @@ async function verifyPendingGeneralSubmission() {
 }
 
 async function verifyMirroredReply() {
-  const root = await mkdtemp(join(tmpdir(), "truespec-reply-"));
+  const root = await realpath(await mkdtemp(join(tmpdir(), "truespec-reply-")));
   let viewer;
   try {
     const { first } = await fixture(root, "openspec");
     viewer = await start(root, "openspec");
-    const run = (...args) => call(cli, args, { cwd: root, env: { ...process.env, PATH: "" } });
+    const run = (...args) => call(cli, args, { cwd: root, env: viewer.env });
     const binding = JSON.parse(run(
       "connector", "attach", "--kind", "browser-test",
       "--destination", "browser-chat", "--label", "Browser Test",
     ));
+    viewer = pairedViewer(viewer, binding);
     const [document] = await viewerApi(viewer, "/api/documents");
     const page = await viewerApi(viewer, `/api/documents/${document.id}`);
     const comment = await viewerApi(viewer, `/api/reviews/${viewer.review}/comments`, {
@@ -1322,11 +1364,183 @@ async function verifyMirroredReply() {
   }
 }
 
+async function verifySharedProjectIsolation() {
+  const base = await realpath(await mkdtemp(join(tmpdir(), "truespec-shared-projects-")));
+  const firstRoot = join(base, "first");
+  const secondRoot = join(base, "second");
+  const env = testEnv(base);
+  let first;
+  try {
+    await mkdir(join(firstRoot, "docs"), { recursive: true });
+    await mkdir(join(secondRoot, "docs"), { recursive: true });
+    await writeFile(join(firstRoot, "docs/one.md"), "# First workspace\n\nFirst source.\n");
+    await writeFile(join(secondRoot, "docs/two.md"), "# Second workspace\n\nSecond source.\n");
+    const service = await start(firstRoot, "markdown", env);
+    const attach = (root, destination) => JSON.parse(call(cli, [
+      "connector", "attach", "--kind", "browser-test",
+      "--destination", destination, "--label", "Browser Test",
+    ], { cwd: root, env }));
+    first = pairedViewer(service, attach(firstRoot, "first-chat-private"));
+    const secondService = await start(secondRoot, "markdown", env);
+    const second = pairedViewer(secondService, attach(secondRoot, "second-chat-private"));
+    assert.equal(first.origin, second.origin);
+    assert.notEqual(first.workspace, second.workspace);
+    assert.notEqual(first.review, second.review);
+    for (const [viewer, root, destination] of [
+      [first, firstRoot, "first-chat-private"],
+      [second, secondRoot, "second-chat-private"],
+    ]) {
+      assert.ok(!viewer.url.includes(root));
+      assert.ok(!viewer.url.includes(destination));
+    }
+
+    const [firstDocument] = await viewerApi(first, "/api/documents");
+    const [secondDocument] = await viewerApi(second, "/api/documents");
+    assert.equal(firstDocument.path, "docs/one.md");
+    assert.equal(secondDocument.path, "docs/two.md");
+    await viewerApi(first, `/api/documents/${secondDocument.id}`, undefined, 404);
+    await viewerApi(second, `/api/documents/${firstDocument.id}`, undefined, 404);
+    const unknown = await fetch(new URL(`/api/workspaces/${randomUUID()}/documents`, first.origin));
+    assert.equal(unknown.status, 404);
+    const traversal = await fetch(new URL(
+      `/api/workspaces/${first.workspace}/documents/..%2F..%2Ftruespec%2Fconfig%2Fproject.json`,
+      first.origin,
+    ));
+    assert.ok([404, 422].includes(traversal.status));
+    const forged = await fetch(new URL(
+      `/api/workspaces/${first.workspace}/reviews/${first.review}/end`,
+      first.origin,
+    ), {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Origin: "http://forged.invalid" },
+      body: JSON.stringify({ keep_drafts: false }),
+    });
+    assert.equal(forged.status, 403);
+    const control = await fetch(new URL("/__control/workspaces/register", first.origin), {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Origin: new URL(first.origin).origin },
+      body: JSON.stringify({ root: firstRoot }),
+    });
+    assert.equal(control.status, 401);
+    const guarded = await fetch(new URL(
+      `/api/workspaces/${first.workspace}/documents`,
+      first.origin,
+    ));
+    assert.match(guarded.headers.get("content-security-policy") || "", /default-src 'none'/);
+
+    const submit = async (viewer, document, body) => {
+      const page = await viewerApi(viewer, `/api/documents/${document.id}`);
+      const comment = await viewerApi(viewer, `/api/reviews/${viewer.review}/comments`, {
+        document_id: document.id,
+        revision: page.revision,
+        body,
+        target: { kind: "line", line: 1 },
+      }, 201);
+      const batch = await viewerApi(viewer, `/api/reviews/${viewer.review}/submit`, {
+        key: randomUUID(),
+        drafts: [{ id: comment.id, version: 1 }],
+        end: false,
+      });
+      return { page, comment, batch };
+    };
+    const firstSubmission = await submit(first, firstDocument, "First feedback only.");
+    const secondSubmission = await submit(second, secondDocument, "Second feedback only.");
+    const deliver = (root, binding, expectedBody, reply) => {
+      const run = (...args) => call(cli, args, { cwd: root, env });
+      const envelope = JSON.parse(run(
+        "connector", "poll", "--connection", binding.connection_id, "--wait", "0",
+      ));
+      assert.equal(envelope.event, "batch");
+      assert.equal(envelope.items.length, 1);
+      assert.equal(envelope.items[0].body, expectedBody);
+      run(
+        "connector", "delivered", envelope.batch_id,
+        "--connection", binding.connection_id,
+        "--lease", envelope.lease,
+        "--receipt", `${binding.connection_id}-receipt`,
+      );
+      const replyPath = join(root, "reply.md");
+      return writeFile(replyPath, `${reply}\n`).then(() => {
+        run(
+          "connector", "respond", envelope.batch_id,
+          "--connection", binding.connection_id,
+          "--reply-id", `${binding.connection_id}-reply`,
+          "--body-file", replyPath,
+        );
+      });
+    };
+    const firstBinding = {
+      connection_id: attach(firstRoot, "first-chat-private").connection_id,
+    };
+    const secondBinding = {
+      connection_id: attach(secondRoot, "second-chat-private").connection_id,
+    };
+    await Promise.all([
+      deliver(firstRoot, firstBinding, "First feedback only.", "First reply only."),
+      deliver(secondRoot, secondBinding, "Second feedback only.", "Second reply only."),
+    ]);
+    const firstBoard = await viewerApi(first, `/api/reviews/${first.review}`);
+    const secondBoard = await viewerApi(second, `/api/reviews/${second.review}`);
+    assert.deepEqual(firstBoard.replies.map(reply => reply.body), ["First reply only.\n"]);
+    assert.deepEqual(secondBoard.replies.map(reply => reply.body), ["Second reply only.\n"]);
+    assert.ok(!JSON.stringify(firstBoard).includes("Second feedback only."));
+    assert.ok(!JSON.stringify(secondBoard).includes("First feedback only."));
+    assert.equal(firstSubmission.batch.batch_id, firstBoard.comments[0].batch_id);
+    assert.equal(secondSubmission.batch.batch_id, secondBoard.comments[0].batch_id);
+
+    await writeFile(join(firstRoot, "docs/one.md"), "# First workspace\n\nFirst source changed.\n");
+    const refreshed = await viewerApi(first, `/api/documents/${firstDocument.id}`);
+    assert.notEqual(refreshed.revision, firstSubmission.page.revision);
+    assert.equal(
+      (await viewerApi(second, `/api/documents/${secondDocument.id}`)).revision,
+      secondSubmission.page.revision,
+    );
+
+    chrome(["open", first.url]);
+    script(`
+      await page.wait("#article:not([hidden])");
+      check(await page.eval(() => document.querySelector("#article").textContent.includes("First source changed.")),
+        "The first shared-service URL renders only its source");
+    `);
+    chrome(["open", second.url]);
+    script(`
+      await page.wait("#article:not([hidden])");
+      check(await page.eval(() => document.querySelector("#article").textContent.includes("Second source.")),
+        "The second shared-service URL renders only its source");
+      await page.eval(() => history.back());
+      await page.wait(700);
+      check(await page.eval(() => document.querySelector("#article").textContent.includes("First source changed.")),
+        "Browser history remains scoped to the first workspace");
+    `);
+
+    const previousFirst = { workspace: first.workspace, review: first.review };
+    const previousSecond = { workspace: second.workspace, review: second.review };
+    await stop(first);
+    const restarted = await start(firstRoot, "markdown", env);
+    first = restoredViewer(restarted, previousFirst);
+    const restoredSecond = restoredViewer(restarted, previousSecond);
+    assert.equal((await viewerApi(first, `/api/reviews/${first.review}`)).replies.length, 1);
+    assert.equal(
+      (await viewerApi(restoredSecond, `/api/reviews/${restoredSecond.review}`)).replies.length,
+      1,
+    );
+
+    await rm(firstRoot, { recursive: true, force: true });
+    await viewerApi(first, "/api/documents", undefined, 503);
+    assert.equal((await viewerApi(restoredSecond, "/api/documents"))[0].path, "docs/two.md");
+    console.log("Verified two concurrent repositories stay isolated across browsing, delivery, and restart.");
+  } finally {
+    await stop(first);
+    await rm(base, { recursive: true, force: true });
+  }
+}
+
 try {
   await exercise("openspec", 1440);
   await exercise("markdown", 390);
   await verifyPendingGeneralSubmission();
   await verifyMirroredReply();
+  await verifySharedProjectIsolation();
 } finally {
   spawnSync("chrome-devtools-axi", ["stop"], { env: chromeEnv, stdio: "ignore", timeout: 10_000 });
 }

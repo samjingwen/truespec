@@ -12,12 +12,14 @@ const CONFIG_VERSION: u8 = 1;
 const CONFIG_PATH: &str = "truespec/config/project.json";
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ProjectConfig {
     version: u8,
     source: SourceConfig,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SourceConfig {
     adapter: String,
     path: String,
@@ -58,7 +60,9 @@ impl ProjectConfig {
     pub fn repository_root() -> Result<PathBuf> {
         let root = std::env::current_dir()?.canonicalize()?;
         ensure!(
-            root.join(".git").symlink_metadata().is_ok(),
+            root.join(".git")
+                .symlink_metadata()
+                .is_ok_and(|metadata| !metadata.file_type().is_symlink()),
             "Run `truespec init` from the repository root."
         );
         Ok(root)

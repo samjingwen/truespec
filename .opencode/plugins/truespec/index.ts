@@ -1,9 +1,9 @@
 import { Plugin } from "@opencode/plugin";
-import { execFile, spawn, type ChildProcess } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { realpath } from "node:fs/promises";
 import { setTimeout as delay } from "node:timers/promises";
 
-const PROTOCOL = 1;
+const PROTOCOL = 2;
 const MAX_OUTPUT = 32 * 1024 * 1024;
 const INSTALLED_BINARY = "__TRUESPEC_INSTALLED_BINARY__";
 
@@ -14,8 +14,6 @@ type Binding = {
   sessionID: string;
   chatDirectory: string;
 };
-
-type Viewer = { url: string; child: ChildProcess };
 
 type PendingReply = {
   connection_id: string;
@@ -52,7 +50,7 @@ function pendingRecord(value: unknown): value is PendingReply {
 function protocolRecord(text: string): Record<string, unknown> {
   const value: unknown = JSON.parse(text);
   if (!record(value) || value.protocol_version !== PROTOCOL) {
-    throw new Error("The installed TrueSpec binary doesn't support connector protocol 1.");
+    throw new Error("The installed TrueSpec binary doesn't support connector protocol 2. Run `truespec init --integration opencode --force`.");
   }
   return value;
 }
@@ -99,7 +97,6 @@ export default Plugin.define({
     const binary = typeof options.binary === "string" && options.binary.trim()
       ? options.binary
       : process.env.TRUESPEC_BIN || (INSTALLED_BINARY.startsWith("__") ? "truespec" : INSTALLED_BINARY);
-    const viewerByWorkspace = new Map<string, Promise<Viewer>>();
     const bridges = new Map<string, Promise<void>>();
     const mirrors = new Map<string, Promise<void>>();
     const storageKey = `truespec.connections.v1:${ctx.location.directory}`;
@@ -221,60 +218,6 @@ export default Plugin.define({
       return work;
     }
 
-    function startViewer(workspace: string): Promise<Viewer> {
-      return new Promise((resolve, reject) => {
-        const child = spawn(binary, ["connector", "--protocol", String(PROTOCOL), "--root", workspace, "serve", "--json"], {
-          cwd: workspace, signal, stdio: ["ignore", "pipe", "pipe"], windowsHide: true,
-        });
-        let pending = true;
-        let stdout = "";
-        let stderr = "";
-        const timer = setTimeout(() => fail(new Error("TrueSpec did not report a viewer URL in time.")), 10_000);
-        function fail(error: Error) {
-          if (!pending) return;
-          pending = false;
-          clearTimeout(timer);
-          if (child.exitCode === null && child.signalCode === null) child.kill();
-          reject(error);
-        }
-        child.on("error", fail);
-        child.once("exit", () => fail(new Error(stderr.trim() || "The TrueSpec viewer exited before it became ready.")));
-        child.stderr.setEncoding("utf8");
-        child.stderr.on("data", chunk => { stderr = (stderr + chunk).slice(-500); });
-        child.stdout.setEncoding("utf8");
-        child.stdout.on("data", chunk => {
-          if (!pending) return;
-          stdout += chunk;
-          const newline = stdout.indexOf("\n");
-          if (newline < 0 && stdout.length < 8192) return;
-          try {
-            const ready = protocolRecord(stdout.slice(0, newline < 0 ? stdout.length : newline));
-            if (typeof ready.url !== "string" || !/^http:\/\/127\.0\.0\.1:[0-9]+\/$/.test(ready.url)
-                || ready.workspace !== workspace) {
-              throw new Error("TrueSpec reported an unexpected viewer URL or workspace.");
-            }
-            pending = false;
-            clearTimeout(timer);
-            resolve({ url: ready.url, child });
-          } catch (error) {
-            fail(error instanceof Error ? error : new Error("Invalid viewer startup record."));
-          }
-        });
-      });
-    }
-
-    function viewerFor(workspace: string) {
-      const existing = viewerByWorkspace.get(workspace);
-      if (existing) return existing;
-      const started = startViewer(workspace);
-      viewerByWorkspace.set(workspace, started);
-      const forget = () => {
-        if (viewerByWorkspace.get(workspace) === started) viewerByWorkspace.delete(workspace);
-      };
-      void started.then(({ child }) => child.once("exit", forget), forget);
-      return started;
-    }
-
     async function deliver(binding: Binding, batch: Extract<Delivery, { event: "batch" }>) {
       const ids = ["--connection", binding.connection_id, "--lease", batch.lease];
       try {
@@ -352,11 +295,15 @@ export default Plugin.define({
           const output = await run(["attach", "--kind", "opencode", "--destination", sessionID, "--label", "OpenCode"], chatDirectory);
           const binding = { ...output, sessionID, chatDirectory };
           if (!bindingRecord(binding)) throw new Error("TrueSpec reported an invalid review connection.");
-          const viewer = await viewerFor(binding.workspace);
+          if (typeof output.url !== "string") throw new Error("TrueSpec did not report a browser URL.");
+          const url = new URL(output.url);
+          if (url.protocol !== "http:" || url.hostname !== "127.0.0.1"
+              || !/^\/w\/[a-z0-9-]+\/$/.test(url.pathname)
+              || url.searchParams.get("review") !== binding.review_id) {
+            throw new Error("TrueSpec reported an unexpected browser URL.");
+          }
           await changeBindings(known => [...known.filter(item => item.connection_id !== binding.connection_id), binding]);
           bridge(binding);
-          const url = new URL(viewer.url);
-          url.searchParams.set("review", binding.review_id);
           openBrowser(url.href);
           await ctx.session.synthetic({
             sessionID,

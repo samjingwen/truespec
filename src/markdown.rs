@@ -466,7 +466,7 @@ pub fn safe_link(
     }
     let id = id(&parts.join("/"))?;
     Some(format!(
-        "/?doc={}{fragment}",
+        "?doc={}{fragment}",
         utf8_percent_encode(&id, NON_ALPHANUMERIC)
     ))
 }
@@ -499,7 +499,7 @@ mod tests {
         let target = |p: &str| (p == "docs/next page.md").then(|| "42".to_owned());
         assert_eq!(
             safe_link("docs/sub/current.md", "../next%20page.md#next-step", target).as_deref(),
-            Some("/?doc=42#next%2Dstep")
+            Some("?doc=42#next%2Dstep")
         );
         assert!(safe_link("docs/current.md", "../../secret.md", |_| Some("1".into())).is_none());
         assert!(safe_link("docs/current.md", "/root.md", |_| Some("1".into())).is_none());

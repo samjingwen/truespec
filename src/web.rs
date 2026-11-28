@@ -1,8 +1,11 @@
 use std::{
     collections::HashMap,
-    net::{Ipv4Addr, SocketAddrV4},
     path::PathBuf,
-    sync::Arc,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Duration,
 };
 
 use anyhow::Result;
@@ -18,16 +21,27 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::net::TcpListener;
+use tokio::sync::Notify;
 
 use crate::{
     anchor::{Anchor, Location, Status, Target},
+    inbox::{LocalInbox, PROTOCOL_VERSION},
     markdown::{Heading, Rendered, SourceLine, render, safe_link},
     review::{
         AgentReply, BatchItem, Comment, DraftRef, Problem, Session, Store, Submission,
-        SubmittedSource, conflict, invalid,
+        SubmittedSource, UnsupportedDatabaseVersion, conflict, invalid,
     },
+    service::{
+        AttachRequest, AttachResponse, DeferRequest, DeliveryRequest, Health, OwnerLock,
+        PollRequest, Registration, RespondRequest, ServiceConfig, ServicePaths,
+        WorkspaceRegistration, authorized,
+    },
+    service_registry::{DuplicateWorkspaceIdentity, ProjectContext, ProjectRegistry},
     source::{Document, DocumentSource, Snapshot},
 };
+
+const BROWSER_BODY_LIMIT: usize = 256 * 1024;
+const CONNECTOR_REPLY_BODY_LIMIT: usize = 7 * 1024 * 1024;
 
 #[derive(Clone)]
 struct App {
@@ -37,91 +51,154 @@ struct App {
     source_name: &'static str,
 }
 
-pub async fn serve(
-    store: Store,
-    source: Box<dyn DocumentSource>,
-    workspace: PathBuf,
-    source_name: &'static str,
-    port: u16,
-    json: bool,
+#[derive(Clone)]
+struct SharedApp {
+    registry: ProjectRegistry,
+    config: ServiceConfig,
+    registration: Arc<Mutex<Registration>>,
+    paths: ServicePaths,
+    shutdown: Arc<Notify>,
+    shutdown_requested: Arc<AtomicBool>,
+}
+
+pub async fn serve_shared(
+    listener: TcpListener,
+    registry: ProjectRegistry,
+    config: ServiceConfig,
+    registration: Registration,
+    paths: ServicePaths,
+    _owner: OwnerLock,
 ) -> Result<()> {
-    let review = store.current_session()?;
-    let listener = TcpListener::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, port)).await?;
     let address = listener.local_addr()?.to_string();
     let origin = format!("http://{address}");
+    let shutdown = Arc::new(Notify::new());
+    let shutdown_requested = Arc::new(AtomicBool::new(false));
+    let state = SharedApp {
+        registry,
+        config,
+        registration: Arc::new(Mutex::new(registration)),
+        paths,
+        shutdown: shutdown.clone(),
+        shutdown_requested: shutdown_requested.clone(),
+    };
     let app = Router::new()
+        .route("/", get(index))
+        .route("/w/{workspace}", get(index))
+        .route("/w/{workspace}/", get(index))
+        .route("/app.js", get(app_js))
+        .route("/app.css", get(app_css))
+        .route("/targets.js", get(targets_js))
+        .route("/favicon.svg", get(favicon))
         .route(
-            "/",
-            get(|| async {
-                asset(
-                    "text/html; charset=utf-8",
-                    include_str!("../web/index.html"),
-                )
-            }),
+            "/api/workspaces/{workspace}/bootstrap",
+            get(shared_bootstrap),
         )
         .route(
-            "/app.js",
-            get(|| async {
-                asset(
-                    "text/javascript; charset=utf-8",
-                    include_str!("../web/app.js"),
-                )
-            }),
+            "/api/workspaces/{workspace}/documents",
+            get(shared_documents),
         )
         .route(
-            "/app.css",
-            get(|| async { asset("text/css; charset=utf-8", include_str!("../web/app.css")) }),
+            "/api/workspaces/{workspace}/documents/{id}",
+            get(shared_document),
         )
         .route(
-            "/targets.js",
-            get(|| async {
-                asset(
-                    "text/javascript; charset=utf-8",
-                    include_str!("../web/targets.js"),
-                )
-            }),
+            "/api/workspaces/{workspace}/reviews/{review}",
+            get(shared_board),
         )
         .route(
-            "/favicon.svg",
-            get(|| async { asset("image/svg+xml", include_str!("../web/favicon.svg")) }),
+            "/api/workspaces/{workspace}/reviews/{review}/comments",
+            post(shared_add_comment),
         )
-        .route("/api/bootstrap", get(bootstrap))
-        .route("/api/documents", get(documents))
-        .route("/api/documents/{id}", get(document))
-        .route("/api/reviews/{review}", get(board))
-        .route("/api/reviews/{review}/comments", post(add_comment))
-        .route("/api/reviews/{review}/general", post(add_general_comment))
-        .route("/api/reviews/{review}/comments/{id}", post(change_comment))
-        .route("/api/reviews/{review}/submit", post(submit))
-        .route("/api/reviews/{review}/end", post(end_session))
-        .route("/api/reviews/{review}/new", post(new_session))
-        .layer(DefaultBodyLimit::max(256 * 1024))
+        .route(
+            "/api/workspaces/{workspace}/reviews/{review}/general",
+            post(shared_add_general_comment),
+        )
+        .route(
+            "/api/workspaces/{workspace}/reviews/{review}/comments/{id}",
+            post(shared_change_comment),
+        )
+        .route(
+            "/api/workspaces/{workspace}/reviews/{review}/submit",
+            post(shared_submit),
+        )
+        .route(
+            "/api/workspaces/{workspace}/reviews/{review}/end",
+            post(shared_end_session),
+        )
+        .route(
+            "/api/workspaces/{workspace}/reviews/{review}/new",
+            post(shared_new_session),
+        )
+        .route("/__control/health", get(control_health))
+        .route(
+            "/__control/workspaces/register",
+            post(control_register_workspace),
+        )
+        .route(
+            "/__control/workspaces/resolve",
+            post(control_resolve_workspace),
+        )
+        .route(
+            "/__control/connectors/attach",
+            post(control_connector_attach),
+        )
+        .route("/__control/connectors/poll", post(control_connector_poll))
+        .route(
+            "/__control/connectors/delivered",
+            post(control_connector_delivered),
+        )
+        .route("/__control/connectors/defer", post(control_connector_defer))
+        .route(
+            "/__control/connectors/respond",
+            post(control_connector_respond)
+                .layer(DefaultBodyLimit::max(CONNECTOR_REPLY_BODY_LIMIT)),
+        )
+        .route("/__control/shutdown", post(control_shutdown))
+        .layer(DefaultBodyLimit::max(BROWSER_BODY_LIMIT))
         .layer(middleware::from_fn_with_state(
-            (address, origin.clone()),
+            (address, origin),
             local_only,
         ))
-        .with_state(App {
-            store,
-            source: source.into(),
-            workspace: workspace.clone(),
-            source_name,
-        });
-    if json {
-        let startup = serde_json::json!({
-            "protocol_version": crate::inbox::PROTOCOL_VERSION,
-            "url": format!("{origin}/"),
-            "workspace": workspace,
-            "review_id": review.id,
-        });
-        println!("{}", serde_json::to_string(&startup)?);
-    } else {
-        println!("TrueSpec is listening at {origin}/");
-        println!("Review: {}", review.id);
-    }
+        .with_state(state);
     axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
+        .with_graceful_shutdown(async move {
+            tokio::select! {
+                _ = shutdown.notified() => {}
+                _ = shutdown_signal() => {}
+            }
+            shutdown_requested.store(true, Ordering::Release);
+        })
         .await?;
     Ok(())
+}
+
+async fn index() -> impl IntoResponse {
+    asset(
+        "text/html; charset=utf-8",
+        include_str!("../web/index.html"),
+    )
+}
+
+async fn app_js() -> impl IntoResponse {
+    asset(
+        "text/javascript; charset=utf-8",
+        include_str!("../web/app.js"),
+    )
+}
+
+async fn app_css() -> impl IntoResponse {
+    asset("text/css; charset=utf-8", include_str!("../web/app.css"))
+}
+
+async fn targets_js() -> impl IntoResponse {
+    asset(
+        "text/javascript; charset=utf-8",
+        include_str!("../web/targets.js"),
+    )
+}
+
+async fn favicon() -> impl IntoResponse {
+    asset("image/svg+xml", include_str!("../web/favicon.svg"))
 }
 
 async fn shutdown_signal() {
@@ -148,12 +225,14 @@ async fn local_only(
         .and_then(|v| v.to_str().ok())
         == Some(host.as_str());
     let safe = matches!(*request.method(), Method::GET | Method::HEAD);
+    let private_control = request.uri().path().starts_with("/__control/")
+        && request.headers().contains_key(header::AUTHORIZATION);
     let origin_matches = request
         .headers()
         .get(header::ORIGIN)
         .and_then(|v| v.to_str().ok())
         == Some(origin.as_str());
-    if !host_matches || (!safe && !origin_matches) {
+    if !host_matches || (!safe && !origin_matches && !private_control) {
         return (
             StatusCode::FORBIDDEN,
             "Use the TrueSpec loopback URL from the terminal.",
@@ -193,18 +272,19 @@ impl IntoResponse for ApiError {
             }
             Some(Problem::Missing(message)) => (StatusCode::NOT_FOUND, *message, None),
             Some(Problem::Conflict(message)) => (StatusCode::CONFLICT, message.as_str(), None),
+            Some(Problem::Unavailable(message)) => {
+                (StatusCode::SERVICE_UNAVAILABLE, *message, None)
+            }
+            Some(Problem::Unauthorized(message)) => (StatusCode::UNAUTHORIZED, *message, None),
             Some(Problem::Confirm {
                 message,
                 confirmation,
             }) => (StatusCode::CONFLICT, message.as_str(), Some(confirmation)),
-            None => {
-                eprintln!("TrueSpec request failed: {:#}", self.0);
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "TrueSpec could not finish the request. Check the serve terminal and try again.",
-                    None,
-                )
-            }
+            None => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "TrueSpec could not finish the request. Check service status and try again.",
+                None,
+            ),
         };
         (
             code,
@@ -249,6 +329,392 @@ fn conditional(value: impl Serialize, headers: &HeaderMap) -> Result<Response, A
         HeaderValue::from_static("private, no-cache"),
     );
     Ok(response)
+}
+
+fn control_authorized(headers: &HeaderMap, app: &SharedApp) -> Result<(), ApiError> {
+    let header = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok());
+    if authorized(header, &app.config) {
+        Ok(())
+    } else {
+        Err(ApiError(
+            Problem::Unauthorized("Private service authentication failed.").into(),
+        ))
+    }
+}
+
+async fn control_health(
+    State(app): State<SharedApp>,
+    headers: HeaderMap,
+) -> Result<Json<Health>, ApiError> {
+    control_authorized(&headers, &app)?;
+    let registry = app.registry.clone();
+    let (projects, open_reviews) = run(move || registry.counts()).await?;
+    let registration = {
+        let mut registration = app
+            .registration
+            .lock()
+            .map_err(|_| ApiError(anyhow::anyhow!("Service registration is unavailable")))?;
+        if registration.state == crate::service::RegistrationState::Starting {
+            let mut ready = registration.clone();
+            ready.state = crate::service::RegistrationState::Ready;
+            ready.write(&app.paths).map_err(ApiError)?;
+            *registration = ready;
+        }
+        registration.clone()
+    };
+    Ok(Json(Health {
+        protocol: registration.protocol,
+        version: registration.version,
+        instance_id: registration.instance_id,
+        pid: registration.pid,
+        state: "ready".into(),
+        projects,
+        open_reviews,
+    }))
+}
+
+#[derive(Deserialize)]
+struct RegisterWorkspaceRequest {
+    root: PathBuf,
+}
+
+async fn control_register_workspace(
+    State(app): State<SharedApp>,
+    headers: HeaderMap,
+    Json(request): Json<RegisterWorkspaceRequest>,
+) -> Result<Json<WorkspaceRegistration>, ApiError> {
+    control_authorized(&headers, &app)?;
+    let registry = app.registry.clone();
+    let project = run(move || registry.register(&request.root))
+        .await
+        .map_err(control_project_error)?;
+    Ok(Json(WorkspaceRegistration {
+        workspace_id: project.id.clone(),
+    }))
+}
+
+async fn control_resolve_workspace(
+    State(app): State<SharedApp>,
+    headers: HeaderMap,
+    Json(request): Json<RegisterWorkspaceRequest>,
+) -> Result<Json<WorkspaceRegistration>, ApiError> {
+    control_authorized(&headers, &app)?;
+    let registry = app.registry.clone();
+    let workspace_id = run(move || registry.resolve_registered(&request.root)).await?;
+    Ok(Json(WorkspaceRegistration { workspace_id }))
+}
+
+fn control_protocol(protocol: u8) -> Result<(), ApiError> {
+    if protocol == PROTOCOL_VERSION {
+        Ok(())
+    } else {
+        Err(ApiError(invalid(format!(
+            "Unsupported connector protocol {protocol}; expected {PROTOCOL_VERSION}."
+        ))))
+    }
+}
+
+fn control_project_error(error: ApiError) -> ApiError {
+    if let Some(unsupported) = error.0.downcast_ref::<UnsupportedDatabaseVersion>() {
+        return ApiError(invalid(unsupported.to_string()));
+    }
+    if let Some(duplicate) = error.0.downcast_ref::<DuplicateWorkspaceIdentity>() {
+        return ApiError(conflict(duplicate.to_string()));
+    }
+    error
+}
+
+async fn control_connector_attach(
+    State(app): State<SharedApp>,
+    headers: HeaderMap,
+    Json(request): Json<AttachRequest>,
+) -> Result<Json<AttachResponse>, ApiError> {
+    control_authorized(&headers, &app)?;
+    control_protocol(request.protocol)?;
+    let registry = app.registry.clone();
+    let project = run(move || registry.register(&request.root))
+        .await
+        .map_err(control_project_error)?;
+    let store = project.store.clone();
+    let kind = request.kind;
+    let destination = request.destination;
+    let label = request.label;
+    let binding = run(move || store.bind_connector(&kind, &destination, &label)).await?;
+    let service_url = app
+        .registration
+        .lock()
+        .map_err(|_| ApiError(anyhow::anyhow!("Service registration is unavailable")))?
+        .url
+        .clone();
+    Ok(Json(AttachResponse {
+        protocol_version: PROTOCOL_VERSION,
+        workspace_id: project.id.clone(),
+        workspace: project.root.clone(),
+        connection_id: binding.connection_id,
+        review_id: binding.review_id.clone(),
+        url: format!(
+            "{}w/{}/?review={}",
+            service_url, project.id, binding.review_id
+        ),
+    }))
+}
+
+async fn control_connector_poll(
+    State(app): State<SharedApp>,
+    headers: HeaderMap,
+    Json(request): Json<PollRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    control_authorized(&headers, &app)?;
+    control_protocol(request.protocol)?;
+    if request.wait_seconds > 300 {
+        return Err(ApiError(invalid(
+            "Connector wait cannot exceed 300 seconds.",
+        )));
+    }
+    let registry = app.registry.clone();
+    let workspace = request.workspace_id;
+    let connection = request.connection;
+    let wait = Duration::from_secs(request.wait_seconds);
+    let shutdown = app.shutdown_requested.clone();
+    let envelope = run(move || {
+        LocalInbox(registry.store(&workspace)?)
+            .poll_connector_until(&connection, wait, || shutdown.load(Ordering::Acquire))
+    })
+    .await?;
+    Ok(Json(
+        serde_json::to_value(envelope).map_err(|error| ApiError(error.into()))?,
+    ))
+}
+
+async fn control_connector_delivered(
+    State(app): State<SharedApp>,
+    headers: HeaderMap,
+    Json(request): Json<DeliveryRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    control_authorized(&headers, &app)?;
+    control_protocol(request.protocol)?;
+    let registry = app.registry.clone();
+    run(move || {
+        LocalInbox(registry.store(&request.workspace_id)?).delivered(
+            &request.connection,
+            &request.batch_id,
+            &request.lease,
+            &request.receipt,
+        )
+    })
+    .await?;
+    Ok(Json(serde_json::json!({
+        "protocol_version": PROTOCOL_VERSION,
+        "event": "delivered"
+    })))
+}
+
+async fn control_connector_defer(
+    State(app): State<SharedApp>,
+    headers: HeaderMap,
+    Json(request): Json<DeferRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    control_authorized(&headers, &app)?;
+    control_protocol(request.protocol)?;
+    if request.delay_seconds == 0 || request.delay_seconds > 300 {
+        return Err(ApiError(invalid(
+            "Connector retry delay must be between 1 and 300 seconds.",
+        )));
+    }
+    let registry = app.registry.clone();
+    run(move || {
+        LocalInbox(registry.store(&request.workspace_id)?).defer(
+            &request.connection,
+            &request.batch_id,
+            &request.lease,
+            request.delay_seconds,
+        )
+    })
+    .await?;
+    Ok(Json(serde_json::json!({
+        "protocol_version": PROTOCOL_VERSION,
+        "event": "deferred"
+    })))
+}
+
+async fn control_connector_respond(
+    State(app): State<SharedApp>,
+    headers: HeaderMap,
+    Json(request): Json<RespondRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    control_authorized(&headers, &app)?;
+    control_protocol(request.protocol)?;
+    let registry = app.registry.clone();
+    run(move || {
+        registry.store(&request.workspace_id)?.record_reply(
+            &request.connection,
+            &request.batch_id,
+            &request.reply_id,
+            &request.body,
+        )
+    })
+    .await?;
+    Ok(Json(serde_json::json!({
+        "protocol_version": PROTOCOL_VERSION,
+        "event": "responded"
+    })))
+}
+
+async fn control_shutdown(
+    State(app): State<SharedApp>,
+    headers: HeaderMap,
+) -> Result<StatusCode, ApiError> {
+    control_authorized(&headers, &app)?;
+    app.shutdown_requested.store(true, Ordering::Release);
+    app.shutdown.notify_one();
+    Ok(StatusCode::ACCEPTED)
+}
+
+async fn shared_project(app: &SharedApp, workspace: String) -> Result<App, ApiError> {
+    let registry = app.registry.clone();
+    let project = run(move || registry.project(&workspace))
+        .await
+        .map_err(|error| {
+            use crate::service_registry::ProjectProblem;
+            match error.0.downcast_ref::<ProjectProblem>() {
+                Some(ProjectProblem::Missing) => {
+                    ApiError(Problem::Missing("This workspace is not registered.").into())
+                }
+                Some(ProjectProblem::Unavailable) => ApiError(
+                    Problem::Unavailable("This workspace is currently unavailable.").into(),
+                ),
+                None => error,
+            }
+        })?;
+    Ok(project_app(&project))
+}
+
+fn project_app(project: &ProjectContext) -> App {
+    App {
+        store: project.store.clone(),
+        source: project.source.clone(),
+        workspace: project.root.clone(),
+        source_name: project.source_name,
+    }
+}
+
+async fn shared_bootstrap(
+    State(shared): State<SharedApp>,
+    Path(workspace): Path<String>,
+) -> Result<Json<Bootstrap>, ApiError> {
+    bootstrap(State(shared_project(&shared, workspace).await?)).await
+}
+
+async fn shared_documents(
+    State(shared): State<SharedApp>,
+    Path(workspace): Path<String>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    documents(State(shared_project(&shared, workspace).await?), headers).await
+}
+
+async fn shared_document(
+    State(shared): State<SharedApp>,
+    Path((workspace, id)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    document(
+        State(shared_project(&shared, workspace).await?),
+        Path(id),
+        headers,
+    )
+    .await
+}
+
+async fn shared_board(
+    State(shared): State<SharedApp>,
+    Path((workspace, review)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    board(
+        State(shared_project(&shared, workspace).await?),
+        Path(review),
+        headers,
+    )
+    .await
+}
+
+async fn shared_add_comment(
+    State(shared): State<SharedApp>,
+    Path((workspace, review)): Path<(String, String)>,
+    request: Json<NewComment>,
+) -> Result<impl IntoResponse, ApiError> {
+    add_comment(
+        State(shared_project(&shared, workspace).await?),
+        Path(review),
+        request,
+    )
+    .await
+}
+
+async fn shared_add_general_comment(
+    State(shared): State<SharedApp>,
+    Path((workspace, review)): Path<(String, String)>,
+    request: Json<GeneralComment>,
+) -> Result<impl IntoResponse, ApiError> {
+    add_general_comment(
+        State(shared_project(&shared, workspace).await?),
+        Path(review),
+        request,
+    )
+    .await
+}
+
+async fn shared_change_comment(
+    State(shared): State<SharedApp>,
+    Path((workspace, review, id)): Path<(String, String, String)>,
+    request: Json<CommentChange>,
+) -> Result<StatusCode, ApiError> {
+    change_comment(
+        State(shared_project(&shared, workspace).await?),
+        Path((review, id)),
+        request,
+    )
+    .await
+}
+
+async fn shared_submit(
+    State(shared): State<SharedApp>,
+    Path((workspace, review)): Path<(String, String)>,
+    request: Json<Submission>,
+) -> Result<impl IntoResponse, ApiError> {
+    submit(
+        State(shared_project(&shared, workspace).await?),
+        Path(review),
+        request,
+    )
+    .await
+}
+
+async fn shared_end_session(
+    State(shared): State<SharedApp>,
+    Path((workspace, review)): Path<(String, String)>,
+    request: Json<EndSession>,
+) -> Result<StatusCode, ApiError> {
+    end_session(
+        State(shared_project(&shared, workspace).await?),
+        Path(review),
+        request,
+    )
+    .await
+}
+
+async fn shared_new_session(
+    State(shared): State<SharedApp>,
+    Path((workspace, review)): Path<(String, String)>,
+) -> Result<Json<Session>, ApiError> {
+    new_session(
+        State(shared_project(&shared, workspace).await?),
+        Path(review),
+    )
+    .await
 }
 
 #[derive(Serialize)]
@@ -643,4 +1109,16 @@ async fn new_session(
     })
     .await
     .map(Json)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn duplicate_workspace_identity_is_an_actionable_conflict() {
+        let response =
+            control_project_error(ApiError(DuplicateWorkspaceIdentity.into())).into_response();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+    }
 }

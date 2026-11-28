@@ -17,6 +17,7 @@ const provider = createServer();
 let server;
 let log = "";
 let providerError;
+let serviceEnv;
 
 async function until(description, check, timeout = 20_000) {
   const deadline = Date.now() + timeout;
@@ -30,7 +31,11 @@ async function until(description, check, timeout = 20_000) {
 }
 
 async function api(origin, path, body, expected = 200) {
-  const response = await fetch(new URL(path, origin), body === undefined ? {} : {
+  const workspace = new URL(origin).pathname.match(/^\/w\/([^/]+)\/$/)?.[1];
+  const scoped = workspace && path.startsWith("/api/")
+    ? `/api/workspaces/${workspace}${path.slice(4)}`
+    : path;
+  const response = await fetch(new URL(scoped, origin), body === undefined ? {} : {
     method: "POST",
     headers: { "Content-Type": "application/json", Origin: new URL(origin).origin },
     body: JSON.stringify(body),
@@ -52,7 +57,13 @@ function fakeModel(request, response) {
     const messages = payload.messages || [];
     const userIndex = messages.findLastIndex(item => item.role === "user");
     const text = JSON.stringify(messages[userIndex]?.content || "");
-    const round = text.includes("Use revision two.") ? "Revision two." : text.includes("Use revision one.") ? "Revision one." : null;
+    const round = text.includes("Use markdown revision.")
+      ? "Markdown revision."
+      : text.includes("Use revision two.")
+        ? "Revision two."
+        : text.includes("Use revision one.")
+          ? "Revision one."
+          : null;
     const model = payload.model;
     const replay = messages.slice(userIndex + 1).some(item => item.role === "tool");
     const tool = payload.tools?.find(item => item.function?.name?.endsWith("rewrite_fixture"))?.function?.name;
@@ -127,6 +138,7 @@ try {
     OPENCODE_DB: join(root, "opencode.sqlite"), OPENCODE_DISABLE_FREE_MODELS: "1",
     TRUESPEC_BIN: binary, TRUESPEC_NO_OPEN: "1",
   };
+  serviceEnv = env;
   const initialized = await new Promise(resolve => {
     execFile(binary, ["init", "--integration", "opencode"], {
       env, cwd: workspace, encoding: "utf8", timeout: 25_000,
@@ -154,6 +166,8 @@ try {
 
   const { data: session } = await openCode("/api/session", { title: "Paired review", location: { directory: workspace } });
   const { data: other } = await openCode("/api/session", { title: "Not paired", location: { directory: workspace } });
+  const awayWorkspace = join(root, "away-workspace");
+  await mkdir(join(awayWorkspace, ".git"), { recursive: true });
   const chat = `/api/session/${session.id}`;
   const command = { name: "truespec-review", text: "" };
   const invoke = path => cliRequest("POST", `${path}/command`, command);
@@ -162,10 +176,12 @@ try {
   const notesFor = async path => {
     const inbox = await openCode(`${path}/inbox`);
     const messages = await openCode(`${path}/message?type=synthetic`);
-    return [...new Set(JSON.stringify([inbox, messages]).match(/http:\/\/127\.0\.0\.1:\d+\/\?review=[a-z0-9-]+/g) || [])];
+    return [...new Set(JSON.stringify([inbox, messages]).match(
+      /http:\/\/127\.0\.0\.1:\d+\/w\/[a-z0-9-]+\/\?review=[a-z0-9-]+/g,
+    ) || [])];
   };
   const getNotes = () => notesFor(chat);
-  const viewer = await until("TrueSpec viewer URL published to the paired chat", async () => (await getNotes())[0]);
+  let viewer = await until("TrueSpec viewer URL published to the paired chat", async () => (await getNotes())[0]);
   const review = new URL(viewer).searchParams.get("review");
   assert.ok(review);
   const competing = await invoke(`/api/session/${other.id}`);
@@ -180,14 +196,33 @@ try {
   const [document] = await api(viewer, "/api/documents");
   assert.equal(document.path, reviewedPath);
   const page = () => api(viewer, `/api/documents/${document.id}`);
-  const round = async (message, expected, end) => {
+  const round = async (message, expected, end, verifyMove = false) => {
     const before = await page();
+    if (verifyMove) {
+      const moved = await cliRequest("POST", `${chat}/move`, { directory: awayWorkspace });
+      assert.ok(moved.ok, moved.text);
+      await until("the paired chat to move away", async () =>
+        (await openCode(chat)).data.location.directory === awayWorkspace);
+    }
     const item = await api(viewer, `${route}/comments`, {
       document_id: document.id, revision: before.revision, target: { kind: "line", line: 3 }, body: message,
     }, 201);
     const batch = await api(viewer, `${route}/submit`, {
       key: randomUUID(), drafts: [{ id: item.id, version: 1 }], end,
     });
+    if (verifyMove) {
+      await until("the moved-session delivery to defer", async () => {
+        const state = await board();
+        return state.comments.find(comment => comment.id === item.id)?.delivery === "connector_retry";
+      });
+      assert.equal((await page()).revision, before.revision);
+      const movedMessages = JSON.stringify(await openCode(`${chat}/message?type=user`));
+      assert.doesNotMatch(movedMessages, new RegExp(batch.batch_id.replaceAll("-", "")));
+      const restored = await cliRequest("POST", `${chat}/move`, { directory: workspace });
+      assert.ok(restored.ok, restored.text);
+      await until("the paired chat to return", async () =>
+        (await openCode(chat)).data.location.directory === workspace);
+    }
     await until(`OpenCode to apply ${expected}`, async () => (await page()).html.includes(expected));
     assert.notEqual((await page()).revision, before.revision);
     const mirrored = await until("the mirrored agent reply", async () => {
@@ -205,15 +240,35 @@ try {
     assert.equal(delivered.split(id).length - 1, 1, "The batch belongs to one chat message");
     assert.match(delivered, /@truespec-review/);
     assert.doesNotMatch(delivered, /Treat each comment|Do not edit Markdown|Read the current files/);
+    return batch;
   };
-  await round("Use revision one.", "Revision one.", false);
-  await round("Use revision two.", "Revision two.", true);
-  assert.equal((await board()).comments.filter(comment => comment.delivery === "replied").length, 2);
-  assert.equal((await board()).replies.length, 2);
+  const firstBatch = await round("Use revision one.", "Revision one.", false, true);
 
   const markdownWorkspace = join(root, "markdown-workspace");
   await mkdir(join(markdownWorkspace, ".git"), { recursive: true });
+  await mkdir(join(markdownWorkspace, ".opencode/plugins"), { recursive: true });
   await writeFile(join(markdownWorkspace, "guide.md"), "# Markdown guide\n");
+  await writeFile(join(markdownWorkspace, ".opencode/plugins/rewrite-fixture.ts"), `
+    import { Plugin } from "@opencode/plugin"
+    import { writeFile } from "node:fs/promises"
+    import { join } from "node:path"
+    export default Plugin.define({
+      id: "rewrite-markdown-fixture",
+      async setup(ctx) {
+        await ctx.tool.transform(editor => editor.add({
+          name: "rewrite_fixture",
+          description: "Update the deterministic Markdown fixture",
+          input: { type: "object", properties: { revision: { enum: ["Markdown revision."] } },
+            required: ["revision"], additionalProperties: false },
+          options: { codemode: false },
+          async execute({ revision }) {
+            await writeFile(join(ctx.location.directory, "guide.md"), "# Markdown guide\\n\\n" + revision + "\\n")
+            return { content: "Updated the Markdown fixture." }
+          },
+        }))
+      },
+    })
+  `);
   await writeFile(join(markdownWorkspace, "opencode.json"), JSON.stringify({
     model: "fixture/mock",
     providers: {
@@ -242,12 +297,74 @@ try {
     "Markdown TrueSpec viewer URL",
     async () => (await notesFor(markdownChat))[0],
   );
+  assert.notEqual(new URL(markdownViewer).pathname, new URL(viewer).pathname);
+  assert.equal((await board()).review.ended, false);
   const markdownDocuments = await api(markdownViewer, "/api/documents");
-  assert.equal(markdownDocuments.find(document => document.path === "guide.md")?.kind, "markdown");
+  const markdownDocument = markdownDocuments.find(document => document.path === "guide.md");
+  assert.equal(markdownDocument?.kind, "markdown");
+  const markdownRoute = `/api/reviews/${new URL(markdownViewer).searchParams.get("review")}`;
+  const markdownBefore = await api(markdownViewer, `/api/documents/${markdownDocument.id}`);
+  const markdownComment = await api(markdownViewer, `${markdownRoute}/comments`, {
+    document_id: markdownDocument.id,
+    revision: markdownBefore.revision,
+    target: { kind: "line", line: 1 },
+    body: "Use markdown revision.",
+  }, 201);
+  const markdownBatch = await api(markdownViewer, `${markdownRoute}/submit`, {
+    key: randomUUID(),
+    drafts: [{ id: markdownComment.id, version: 1 }],
+    end: true,
+  });
+  await until("OpenCode to apply the second repository feedback", async () =>
+    (await api(markdownViewer, `/api/documents/${markdownDocument.id}`)).html.includes("Markdown revision."));
+  const markdownBoard = await until("the second repository mirrored reply", async () => {
+    const state = await api(markdownViewer, markdownRoute);
+    return state.replies?.some(reply => reply.batch_id === markdownBatch.batch_id) ? state : undefined;
+  });
+  assert.equal(markdownBoard.replies.length, 1);
+  assert.equal(markdownBoard.review.ended, true);
+  const markdownMessages = JSON.stringify(await openCode(`${markdownChat}/message?type=user`));
+  const markdownMessageID = `msg_truespec_${markdownBatch.batch_id.replaceAll("-", "")}`;
+  assert.equal(markdownMessages.split(markdownMessageID).length - 1, 1);
+  assert.doesNotMatch(markdownMessages, new RegExp(firstBatch.batch_id));
+
+  const lifecycle = args => new Promise(resolve => {
+    execFile(binary, args, { env, cwd: workspace, encoding: "utf8", timeout: 25_000 },
+      (error, stdout, stderr) => resolve({
+        ok: !error,
+        text: stdout.trim() || stderr.trim(),
+      }));
+  });
+  const beforeRestart = JSON.parse((await lifecycle(["status", "--json"])).text);
+  assert.equal((await lifecycle(["down", "--json"])).ok, true);
+  const reopenedAfterRestart = await invoke(chat);
+  assert.ok(reopenedAfterRestart.ok, reopenedAfterRestart.text);
+  const afterRestart = await until("shared service recovery after restart", async () => {
+    const result = await lifecycle(["status", "--json"]);
+    if (!result.ok) return undefined;
+    const status = JSON.parse(result.text);
+    return status.state === "running" && status.pid !== beforeRestart.pid ? status : undefined;
+  });
+  viewer = (await getNotes()).at(-1);
+  assert.equal(afterRestart.state, "running");
+  assert.notEqual(afterRestart.pid, beforeRestart.pid);
+
+  const secondBatch = await round("Use revision two.", "Revision two.", true);
+  assert.equal((await board()).comments.filter(comment => comment.delivery === "replied").length, 2);
+  assert.equal((await board()).replies.length, 2);
+  const firstMessages = JSON.stringify(await openCode(`${chat}/message?type=user`));
+  assert.doesNotMatch(firstMessages, new RegExp(markdownBatch.batch_id));
+  assert.match(firstMessages, new RegExp(firstBatch.batch_id.replaceAll("-", "")));
+  assert.match(firstMessages, new RegExp(secondBatch.batch_id.replaceAll("-", "")));
 
   const otherMessages = await openCode(`/api/session/${other.id}/message?type=user`);
   assert.doesNotMatch(JSON.stringify(otherMessages), /@truespec-review/);
-  console.log("Verified paired OpenCode review rounds and both initialized source adapters.");
+  const exit = once(server, "exit");
+  server.kill();
+  await exit;
+  server = undefined;
+  assert.equal(JSON.parse((await lifecycle(["status", "--json"])).text).state, "running");
+  console.log("Verified two concurrent OpenCode repositories, service recovery, and isolated replies.");
 } finally {
   if (server && server.exitCode === null && server.signalCode === null) {
     const exit = once(server, "exit");
@@ -258,5 +375,11 @@ try {
   }
   provider.closeAllConnections();
   provider.close();
+  if (serviceEnv) {
+    await new Promise(resolve => {
+      execFile(binary, ["down", "--json"], { env: serviceEnv, encoding: "utf8", timeout: 15_000 },
+        () => resolve());
+    });
+  }
   await rm(root, { recursive: true, force: true });
 }

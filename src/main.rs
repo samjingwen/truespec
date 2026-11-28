@@ -5,6 +5,8 @@ mod integration;
 mod markdown;
 mod project;
 mod review;
+mod service;
+mod service_registry;
 mod source;
 mod web;
 
@@ -12,13 +14,11 @@ use std::{
     fs::File,
     io::{self, Read},
     path::{Path, PathBuf},
-    time::Duration,
 };
 
-use anyhow::{Result, ensure};
+use anyhow::{Context, Result, ensure};
 use clap::{Parser, Subcommand};
-use inbox::{LocalInbox, PROTOCOL_VERSION};
-use review::Store;
+use inbox::PROTOCOL_VERSION;
 
 #[derive(Parser)]
 #[command(version, about)]
@@ -46,6 +46,32 @@ enum Command {
         /// Replace differing generated integration files.
         #[arg(long)]
         force: bool,
+        /// Permanently discard local review state and create a new workspace identity.
+        #[arg(long)]
+        reset_state: bool,
+    },
+    /// Start the shared TrueSpec background service.
+    Up {
+        /// Emit machine-readable status.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show shared TrueSpec background service status.
+    Status {
+        /// Emit machine-readable status.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Stop the shared TrueSpec background service.
+    Down {
+        /// Emit machine-readable status.
+        #[arg(long)]
+        json: bool,
+    },
+    #[command(hide = true)]
+    Service {
+        #[command(subcommand)]
+        command: ServiceCommand,
     },
     #[command(hide = true)]
     Connector {
@@ -59,19 +85,12 @@ enum Command {
 }
 
 #[derive(Subcommand)]
+enum ServiceCommand {
+    Run,
+}
+
+#[derive(Subcommand)]
 enum ConnectorCommand {
-    /// Start the initialized loopback viewer.
-    Serve {
-        /// Use an explicit loopback port. Zero asks the OS to choose.
-        #[arg(long, default_value_t = 0)]
-        port: u16,
-        /// Emit a versioned JSON startup record.
-        #[arg(long)]
-        json: bool,
-        /// Delete only local review state before starting.
-        #[arg(long)]
-        reset_state: bool,
-    },
     /// Pair with the open review or start a new review if the previous one ended.
     Attach {
         #[arg(long)]
@@ -129,6 +148,7 @@ fn main() -> Result<()> {
             integration,
             all,
             force,
+            reset_state,
         } => {
             let root = project::ProjectConfig::repository_root()?;
             let config = project::ProjectConfig::initialize(
@@ -141,9 +161,38 @@ fn main() -> Result<()> {
                 binary: std::env::current_exe()?.canonicalize()?,
                 config_dir: integration::config_dir()?,
             };
-            let changed =
-                initialize::InitPlan::build(&root, &config, &integrations, &context, force)?
-                    .apply()?;
+            let plan = initialize::InitPlan::build(&root, &config, &integrations, &context, force)?;
+            let client = service::ServiceClient::open()?;
+            client.up()?;
+            let changed = plan.apply()?;
+            let state_reset = if reset_state {
+                eprintln!(
+                    "Resetting local TrueSpec review state. Drafts, reviews, batches, replies, and connector bindings will be permanently deleted."
+                );
+                let maintenance = service::MaintenanceLock::acquire()?;
+                client.down()?;
+                let reset = service::reset_stopped_workspace(&root, &maintenance);
+                drop(maintenance);
+                let reset = match reset {
+                    Ok(reset) => reset,
+                    Err(error) => {
+                        let _ = client.up();
+                        return Err(error);
+                    }
+                };
+                if reset.cleanup_incomplete {
+                    eprintln!(
+                        "Fresh review state is active, but quarantined old state could not be fully deleted. Inspect `truespec/` for a `.state-reset-*` directory."
+                    );
+                }
+                client.up()?;
+                reset.reset
+            } else {
+                false
+            };
+            let registered = client.register(&root).context(
+                "TrueSpec initialized the repository files, but workspace registration did not complete. Re-run `truespec init` after fixing the service error.",
+            )?;
             println!("Initialized TrueSpec in {}", root.display());
             println!(
                 "Document source: {} ({})",
@@ -153,8 +202,39 @@ fn main() -> Result<()> {
             for path in changed {
                 println!("Installed {}", path.display());
             }
+            if state_reset {
+                println!("Reset local review state.");
+            }
+            println!("Workspace: {}", registered.workspace_id);
             Ok(())
         }
+        Command::Up { json } => {
+            let status = service::ServiceClient::open()?.up()?;
+            print_service_status(&status, json)
+        }
+        Command::Status { json } => {
+            let status = service::ServiceClient::open()?.status()?;
+            print_service_status(&status, json)
+        }
+        Command::Down { json } => {
+            let client = service::ServiceClient::open()?;
+            let stopped = client.down()?;
+            let status = client.status()?;
+            if !json {
+                println!(
+                    "{}",
+                    if stopped {
+                        "TrueSpec service stopped."
+                    } else {
+                        "TrueSpec service is already stopped."
+                    }
+                );
+            }
+            print_service_status(&status, json)
+        }
+        Command::Service {
+            command: ServiceCommand::Run,
+        } => service::run_daemon_entry(),
         Command::Connector {
             root,
             protocol,
@@ -169,50 +249,63 @@ fn main() -> Result<()> {
     }
 }
 
-fn connector(root: Option<&std::path::Path>, command: ConnectorCommand) -> Result<()> {
-    if let ConnectorCommand::Serve {
-        port,
-        json,
-        reset_state,
-    } = command
-    {
-        let (root, config) = configured_project(root)?;
-        let adapter = config.adapter().open(&root, config.source_path())?;
-        if reset_state {
-            review::reset_state(&root)?;
-        }
-        let store = Store::open(&root, true)?;
-        return tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .build()?
-            .block_on(web::serve(
-                store,
-                adapter,
-                root,
-                config.adapter().label(),
-                port,
-                json,
-            ));
+fn print_service_status(status: &service::Status, json: bool) -> Result<()> {
+    if json {
+        println!("{}", serde_json::to_string(status)?);
+        return Ok(());
     }
-    let (root, config) = configured_project(root)?;
+    println!("TrueSpec service: {}", status.state);
+    if let Some(version) = &status.version {
+        println!("Version: {version}");
+    }
+    if let Some(pid) = status.pid {
+        println!("PID: {pid}");
+    }
+    if let Some(endpoint) = &status.endpoint {
+        println!("Endpoint: {endpoint}");
+    }
+    if let Some(projects) = status.projects {
+        println!("Projects: {projects}");
+    }
+    if let Some(open_reviews) = status.open_reviews {
+        println!("Open reviews: {open_reviews}");
+    } else if matches!(status.state, "running" | "incompatible") {
+        println!("Open reviews: unknown (workspace state is still loading)");
+    }
+    if let Some(detail) = &status.detail {
+        println!("Detail: {detail}");
+    }
+    Ok(())
+}
+
+fn connector(root: Option<&std::path::Path>, command: ConnectorCommand) -> Result<()> {
+    let root = configured_root(root)?;
+    if matches!(&command, ConnectorCommand::Attach { .. }) {
+        let config = project::ProjectConfig::load(&root)?;
+        config.adapter().open(&root, config.source_path())?;
+    }
+    let client = service::ServiceClient::open()?;
+    client.up()?;
     let output = match command {
         ConnectorCommand::Attach {
             kind: name,
             destination,
             label,
-        } => {
-            config.adapter().open(&root, config.source_path())?;
-            let binding = Store::open(&root, true)?.bind_connector(&name, &destination, &label)?;
-            serde_json::json!({
-                "protocol_version": PROTOCOL_VERSION,
-                "workspace": root,
-                "connection_id": binding.connection_id,
-                "review_id": binding.review_id,
-            })
-        }
+        } => serde_json::to_value(client.attach(&service::AttachRequest {
+            protocol: PROTOCOL_VERSION,
+            root,
+            kind: name,
+            destination,
+            label,
+        })?)?,
         ConnectorCommand::Poll { connection, wait } => {
-            let inbox = LocalInbox(Store::open(&root, false)?);
-            serde_json::to_value(inbox.poll_connector(&connection, Duration::from_secs(wait))?)?
+            let workspace = client.resolve(&root)?;
+            client.poll(&service::PollRequest {
+                protocol: PROTOCOL_VERSION,
+                workspace_id: workspace.workspace_id,
+                connection,
+                wait_seconds: wait,
+            })?
         }
         ConnectorCommand::Delivered {
             batch_id,
@@ -220,9 +313,15 @@ fn connector(root: Option<&std::path::Path>, command: ConnectorCommand) -> Resul
             lease,
             receipt,
         } => {
-            let inbox = LocalInbox(Store::open(&root, false)?);
-            inbox.delivered(&connection, &batch_id, &lease, &receipt)?;
-            serde_json::json!({"protocol_version": PROTOCOL_VERSION, "event": "delivered"})
+            let workspace = client.resolve(&root)?;
+            client.delivered(&service::DeliveryRequest {
+                protocol: PROTOCOL_VERSION,
+                workspace_id: workspace.workspace_id,
+                connection,
+                batch_id,
+                lease,
+                receipt,
+            })?
         }
         ConnectorCommand::Defer {
             batch_id,
@@ -230,9 +329,15 @@ fn connector(root: Option<&std::path::Path>, command: ConnectorCommand) -> Resul
             lease,
             retry_after,
         } => {
-            let inbox = LocalInbox(Store::open(&root, false)?);
-            inbox.defer(&connection, &batch_id, &lease, retry_after)?;
-            serde_json::json!({"protocol_version": PROTOCOL_VERSION, "event": "deferred"})
+            let workspace = client.resolve(&root)?;
+            client.defer(&service::DeferRequest {
+                protocol: PROTOCOL_VERSION,
+                workspace_id: workspace.workspace_id,
+                connection,
+                batch_id,
+                lease,
+                delay_seconds: retry_after,
+            })?
         }
         ConnectorCommand::Respond {
             batch_id,
@@ -241,23 +346,26 @@ fn connector(root: Option<&std::path::Path>, command: ConnectorCommand) -> Resul
             body_file,
         } => {
             let body = read_reply_body(&body_file)?;
-            let store = Store::open(&root, false)?;
-            store.record_reply(&connection, &batch_id, &reply_id, &body)?;
-            serde_json::json!({"protocol_version": PROTOCOL_VERSION, "event": "responded"})
+            let workspace = client.resolve(&root)?;
+            client.respond(&service::RespondRequest {
+                protocol: PROTOCOL_VERSION,
+                workspace_id: workspace.workspace_id,
+                connection,
+                batch_id,
+                reply_id,
+                body,
+            })?
         }
-        ConnectorCommand::Serve { .. } => unreachable!(),
     };
     println!("{}", serde_json::to_string(&output)?);
     Ok(())
 }
 
-fn configured_project(root: Option<&Path>) -> Result<(PathBuf, project::ProjectConfig)> {
-    let root = match root {
+fn configured_root(root: Option<&Path>) -> Result<PathBuf> {
+    Ok(match root {
         Some(root) => root.canonicalize()?,
         None => std::env::current_dir()?.canonicalize()?,
-    };
-    let config = project::ProjectConfig::load(&root)?;
-    Ok((root, config))
+    })
 }
 
 fn read_reply_body(path: &Path) -> Result<String> {
