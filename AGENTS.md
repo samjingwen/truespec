@@ -25,6 +25,8 @@ It serves an embedded browser UI, stores review state separately, and delivers d
 - `src/anchor.rs` owns annotation evidence and conservative relocation.
 - `src/review.rs` owns SQLite review state and immutable batch snapshots.
 - `src/inbox.rs` owns connector leasing, receipts, retries, and delivery envelopes.
+- `src/service.rs` owns private global paths, lifecycle discovery, authentication, owner locking, process control, and bounded operational logs.
+- `src/service_registry.rs` owns minimal global workspace routing metadata and lazy validated project contexts.
 - `src/web.rs` owns the loopback HTTP API and embedded browser assets.
 - `web/` owns the embedded browser interface.
 - `.opencode/plugins/truespec/` owns the optional OpenCode connector.
@@ -49,7 +51,7 @@ It serves an embedded browser UI, stores review state separately, and delivers d
 - Do not execute raw HTML, scripts, or externally loaded images from reviewed Markdown.
 - Keep `truespec/.state/` and `truespec/config/` outside document-serving routes.
 - Never require OpenSpec, OpenCode, Lavish, or Node.js at TrueSpec runtime.
-- Keep `init` as the only public product command and keep connector transport and viewer operations hidden and versioned.
+- Keep `init`, `up`, `status`, and `down` as the complete public product command surface and keep daemon internals, connector transport, and viewer operations hidden and versioned.
 - Do not add browser-based source editing, hosted synchronization, multi-user collaboration, or arbitrary agent launching without an accepted OpenSpec change.
 
 ## Browser and connector behavior

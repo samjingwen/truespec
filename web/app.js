@@ -10,6 +10,8 @@ const generalComposer = elements["general-composer"];
 const generalComposerBody = elements["general-composer-body"];
 const generalComposerToggle = elements["general-composer-toggle"];
 const generalComment = elements["general-comment"];
+const workspaceMatch = location.pathname.match(/^\/w\/([^/]+)\/?$/);
+const workspaceId = workspaceMatch ? decodeURIComponent(workspaceMatch[1]) : undefined;
 const wideLayout = window.matchMedia("(min-width: 60rem)");
 const PANEL_KEYS = {
   documents: "truespec.sidebar.documents",
@@ -328,7 +330,9 @@ function problem(error) {
 }
 
 function locationUrl(id, fragment) {
-  const url = new URL("/", window.location.origin);
+  const url = new URL(window.location.href);
+  url.search = "";
+  url.hash = "";
   if (reviewId) url.searchParams.set("review", reviewId);
   if (id) url.searchParams.set("doc", id);
   if (fragment) url.hash = encodeURIComponent(fragment);
@@ -341,7 +345,16 @@ function currentFragment() {
 }
 
 function workspacePath() {
-  return `/api/reviews/${encodeURIComponent(reviewId)}`;
+  const base = workspaceId
+    ? `/api/workspaces/${encodeURIComponent(workspaceId)}`
+    : "/api";
+  return `${base}/reviews/${encodeURIComponent(reviewId)}`;
+}
+
+function workspaceApi(path) {
+  return workspaceId
+    ? `/api/workspaces/${encodeURIComponent(workspaceId)}/${path}`
+    : `/api/${path}`;
 }
 
 function renderNav() {
@@ -467,7 +480,7 @@ async function loadDoc(id, fragment = "", refresh = false) {
   }
   const previous = page;
   try {
-    const result = await request(`/api/documents/${encodeURIComponent(id)}`);
+    const result = await request(workspaceApi(`documents/${encodeURIComponent(id)}`));
     // A later navigation owns the reader. Ignore an older request's result.
     if (token !== documentRequest) return false;
     if (previous !== result) {
@@ -1197,7 +1210,7 @@ async function startReview() {
   await action(async () => {
     const review = board.latest === reviewId
       ? await request(`${workspacePath()}/new`, {})
-      : (await request("/api/bootstrap")).review;
+      : (await request(workspaceApi("bootstrap"))).review;
     reviewId = review.id;
     lastSubmit = undefined;
     history.replaceState(null, "", locationUrl(currentId, currentFragment()));
@@ -1216,7 +1229,7 @@ async function updateBoard() {
 }
 
 async function updateCatalog() {
-  const refreshed = await request("/api/documents");
+  const refreshed = await request(workspaceApi("documents"));
   if (entries !== refreshed) {
     entries = refreshed;
     renderNav();
@@ -1241,7 +1254,8 @@ async function refresh() {
 function internalLink(event, link) {
   if (!link || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
   const href = new URL(link.href);
-  if (href.origin !== window.location.origin || href.pathname !== "/") return;
+  const pathname = workspaceId ? `/w/${encodeURIComponent(workspaceId)}/` : "/";
+  if (href.origin !== window.location.origin || href.pathname !== pathname) return;
   const id = href.searchParams.get("doc");
   if (!id && !href.hash) return;
   let heading = "";
@@ -1441,7 +1455,7 @@ window.addEventListener("popstate", () => {
 document.addEventListener("visibilitychange", () => void refresh());
 
 async function initialize() {
-  const bootstrap = await request("/api/bootstrap");
+  const bootstrap = await request(workspaceApi("bootstrap"));
   const params = new URL(window.location.href).searchParams;
   reviewId = params.get("review") || bootstrap.review.id;
   resetPanelsForViewport();

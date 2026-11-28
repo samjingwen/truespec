@@ -1,9 +1,9 @@
 use std::{
     fs,
-    io::{BufRead, BufReader, Read, Write},
+    io::{Read, Write},
     net::TcpStream,
     path::Path,
-    process::{Child, Command, Stdio},
+    process::{Command, Stdio},
     time::Duration,
 };
 
@@ -13,48 +13,53 @@ use uuid::Uuid;
 const CLI: &str = env!("CARGO_BIN_EXE_truespec");
 
 struct Viewer {
-    child: Child,
+    root: std::path::PathBuf,
     address: String,
+    workspace: String,
     review: String,
 }
 
 impl Viewer {
-    fn start(root: &Path, adapter: &str, source_path: &str, reset_state: bool) -> Self {
+    fn start(root: &Path, adapter: &str, source_path: &str) -> Self {
+        let root = root.canonicalize().unwrap();
+        fs::create_dir_all(root.join(".git")).unwrap();
         write(
-            root,
+            &root,
             "truespec/config/project.json",
             &format!(
                 "{{\n  \"version\": 1,\n  \"source\": {{\n    \"adapter\": \"{}\",\n    \"path\": \"{}\"\n  }}\n}}\n",
                 adapter, source_path
             ),
         );
-        let mut command = Command::new(CLI);
-        command
-            .current_dir(root)
-            .env("PATH", "")
-            .args(["connector", "--protocol", "1", "serve"]);
-        if reset_state {
-            command.arg("--reset-state");
-        }
-        let mut child = command.stdout(Stdio::piped()).spawn().unwrap();
-        let mut out = BufReader::new(child.stdout.take().unwrap());
-        let mut line = String::new();
-        out.read_line(&mut line).unwrap();
-        let address = line
-            .trim()
-            .strip_prefix("TrueSpec is listening at http://")
-            .unwrap()
-            .trim_end_matches('/')
-            .to_owned();
-        assert!(address.starts_with("127.0.0.1:"));
-        line.clear();
-        out.read_line(&mut line).unwrap();
-        let review = line.trim().strip_prefix("Review: ").unwrap().to_owned();
-        let server = Self {
-            child,
-            address,
-            review,
+        let status: Value = serde_json::from_str(&command(&root, &["up", "--json"], true)).unwrap();
+        let endpoint = string(&status["endpoint"]);
+        let config: Value = serde_json::from_slice(
+            &fs::read(service_home(&root).join("config/truespec/service.json")).unwrap(),
+        )
+        .unwrap();
+        let response = reqwest::blocking::Client::new()
+            .post(format!("{endpoint}__control/workspaces/register"))
+            .bearer_auth(string(&config["token"]))
+            .json(&json!({ "root": root }))
+            .send()
+            .unwrap();
+        assert!(
+            response.status().is_success(),
+            "{}",
+            response.text().unwrap()
+        );
+        let registration: Value = response.json().unwrap();
+        let mut server = Self {
+            root,
+            address: endpoint
+                .strip_prefix("http://")
+                .unwrap()
+                .trim_end_matches('/')
+                .to_owned(),
+            workspace: string(&registration["workspace_id"]).to_owned(),
+            review: String::new(),
         };
+        server.review = string(&server.get("/api/bootstrap")["review"]["id"]).to_owned();
         assert_eq!(server.http("GET", "/", &[], "").0, 200);
         server
     }
@@ -66,6 +71,11 @@ impl Viewer {
         headers: &[(&str, &str)],
         body: &str,
     ) -> (u16, String, String) {
+        let path = if let Some(suffix) = path.strip_prefix("/api/") {
+            format!("/api/workspaces/{}/{}", self.workspace, suffix)
+        } else {
+            path.to_owned()
+        };
         let mut client = TcpStream::connect(&self.address).unwrap();
         client
             .set_read_timeout(Some(Duration::from_secs(5)))
@@ -134,31 +144,13 @@ impl Viewer {
     }
 
     fn stop(&mut self) {
-        #[cfg(unix)]
-        {
-            assert!(
-                Command::new("/bin/kill")
-                    .args(["-TERM", &self.child.id().to_string()])
-                    .status()
-                    .unwrap()
-                    .success()
-            );
-            assert!(self.child.wait().unwrap().success());
-        }
-        #[cfg(not(unix))]
-        {
-            self.child.kill().unwrap();
-            self.child.wait().unwrap();
-        }
+        command(&self.root, &["down", "--json"], true);
     }
 }
 
 impl Drop for Viewer {
     fn drop(&mut self) {
-        if matches!(self.child.try_wait(), Ok(None)) {
-            let _ = self.child.kill();
-            let _ = self.child.wait();
-        }
+        let _ = configured_command(&self.root, &["down", "--json"]).output();
     }
 }
 
@@ -184,15 +176,30 @@ fn doc_id<'a>(docs: &'a Value, path: &str) -> &'a str {
 }
 
 fn command(root: &Path, args: &[&str], success: bool) -> String {
-    let output = Command::new(CLI)
-        .current_dir(root)
-        .env("PATH", "")
-        .args(args)
-        .output()
-        .unwrap();
+    let output = configured_command(root, args).output().unwrap();
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert_eq!(output.status.success(), success, "{args:?}: {stderr}");
     String::from_utf8(output.stdout).unwrap()
+}
+
+fn service_home(root: &Path) -> std::path::PathBuf {
+    root.canonicalize().unwrap().join(".test-service")
+}
+
+fn configured_command(root: &Path, args: &[&str]) -> Command {
+    let root = root.canonicalize().unwrap();
+    let home = service_home(&root);
+    let mut command = Command::new(CLI);
+    command
+        .current_dir(root)
+        .env("PATH", "")
+        .env("HOME", home.join("home"))
+        .env("XDG_CONFIG_HOME", home.join("config"))
+        .env("XDG_STATE_HOME", home.join("state"))
+        .env("XDG_DATA_HOME", home.join("data"))
+        .env("TRUESPEC_SERVICE_PORT", "0")
+        .args(args);
+    command
 }
 
 fn attach(root: &Path, destination: &str) -> Value {
@@ -256,7 +263,7 @@ fn openspec_cross_document_handoff_survives_restart() {
         "Markdown outside the default schema",
     );
     write(root, "openspec/changes/archive/older/tasks.md", "# Tasks");
-    let mut first = Viewer::start(root, "openspec", "openspec", false);
+    let mut first = Viewer::start(root, "openspec", "openspec");
     let binding = attach(root, "cross-document-chat");
     let connection = string(&binding["connection_id"]).to_owned();
     let docs = first.get("/api/documents");
@@ -281,7 +288,7 @@ fn openspec_cross_document_handoff_survives_restart() {
     let two_comment = first.add(two, 5, "Clarify the scope.");
     first.stop();
 
-    let mut second = Viewer::start(root, "markdown", "openspec", false);
+    let mut second = Viewer::start(root, "markdown", "openspec");
     assert_eq!(second.review, first.review);
     let docs = second.get("/api/documents");
     assert_eq!(doc_id(&docs, spec), one);
@@ -355,7 +362,7 @@ fn openspec_cross_document_handoff_survives_restart() {
         true,
     );
     assert_eq!(connector_poll(root, &connection, "0")["event"], "ended");
-    let mut final_viewer = Viewer::start(root, "markdown", "openspec", false);
+    let mut final_viewer = Viewer::start(root, "markdown", "openspec");
     let history = final_viewer.board();
     assert_eq!(history["comments"][0]["delivery"], "replied");
     assert_eq!(history["comments"][0]["resolved"], false);
@@ -376,7 +383,7 @@ fn markdown_refresh_and_stale_confirmation_keep_the_original_context() {
         "# Spec\n\nA stable statement.\n\n| A | B |\n|---|---|\n| 1 | 2 |\n\n<script>throw 1</script>\n",
     );
     write(root, "elsewhere.md", "# Not part of this source");
-    let mut viewer = Viewer::start(root, "markdown", "docs", false);
+    let mut viewer = Viewer::start(root, "markdown", "docs");
     let binding = attach(root, "stale-context-chat");
     let connection = string(&binding["connection_id"]).to_owned();
     let docs = viewer.get("/api/documents");
@@ -466,22 +473,20 @@ fn a_waiting_agent_exits_when_a_browser_review_ends_without_feedback() {
     let fixture = tempfile::tempdir().unwrap();
     let root = fixture.path();
     write(root, "guide.md", "# Guide");
-    let mut viewer = Viewer::start(root, "markdown", ".", false);
+    let mut viewer = Viewer::start(root, "markdown", ".");
     let binding = attach(root, "waiting-chat");
-    let listener = Command::new(CLI)
-        .current_dir(root)
-        .env("PATH", "")
-        .args([
+    let mut listener = configured_command(
+        root,
+        &[
             "connector",
             "poll",
             "--connection",
             string(&binding["connection_id"]),
             "--wait",
             "30",
-        ])
-        .stdout(Stdio::piped())
-        .spawn()
-        .unwrap();
+        ],
+    );
+    let listener = listener.stdout(Stdio::piped()).spawn().unwrap();
     viewer.post(&viewer.api("/end"), 204, json!({ "keep_drafts": false }));
     let output = listener.wait_with_output().unwrap();
     assert!(output.status.success());
@@ -503,7 +508,7 @@ fn hidden_viewer_and_attach_use_initialized_source_configuration() {
         let fixture = tempfile::tempdir().unwrap();
         let root = fixture.path();
         write(root, path, "# Guide\n");
-        let mut viewer = Viewer::start(root, mode, source_path, false);
+        let mut viewer = Viewer::start(root, mode, source_path);
         assert!(
             viewer
                 .get("/api/documents")
@@ -525,7 +530,7 @@ fn hidden_viewer_and_attach_use_initialized_source_configuration() {
             &[
                 "connector",
                 "--protocol",
-                "1",
+                "2",
                 "attach",
                 "--kind",
                 "test",
@@ -570,25 +575,36 @@ fn hidden_viewer_and_attach_use_initialized_source_configuration() {
 }
 
 #[test]
-fn public_help_only_exposes_initialization() {
+fn public_help_exposes_only_initialization_and_service_lifecycle() {
     let help = Command::new(CLI).arg("--help").output().unwrap();
     assert!(help.status.success());
     let help = String::from_utf8(help.stdout).unwrap();
-    assert!(help.contains("init"));
+    for public in ["init", "up", "status", "down"] {
+        assert!(help.contains(&format!("  {public}")));
+    }
     for hidden in [
-        "serve", "setup", "listen", "ack", "complete", "reply", "relink",
+        "service",
+        "connector",
+        "serve",
+        "setup",
+        "listen",
+        "ack",
+        "complete",
+        "reply",
+        "relink",
     ] {
         assert!(!help.contains(&format!("  {hidden}")));
-        assert!(
-            !Command::new(CLI)
-                .arg(hidden)
-                .output()
-                .unwrap()
-                .status
-                .success()
-        );
+        if !matches!(hidden, "service" | "connector") {
+            assert!(
+                !Command::new(CLI)
+                    .arg(hidden)
+                    .output()
+                    .unwrap()
+                    .status
+                    .success()
+            );
+        }
     }
-    assert!(!help.contains("  connector"));
     assert!(
         Command::new(CLI)
             .args(["connector", "--help"])
@@ -602,15 +618,23 @@ fn public_help_only_exposes_initialization() {
 #[test]
 fn init_detects_sources_requires_the_root_and_preserves_state() {
     let fixture = tempfile::tempdir().unwrap();
-    let root = fixture.path();
+    let fixture_root = fixture.path().canonicalize().unwrap();
+    let root = fixture_root.as_path();
     fs::create_dir(root.join(".git")).unwrap();
     write(root, "openspec/specs/guide/spec.md", "# Guide\n");
     write(root, "truespec/.state/keep", "preserve");
     let config_home = root.join("user-config");
+    let service_state = root.join("user-state");
+    let service_data = root.join("user-data");
+    let service_home = root.join("user-home");
     let run = |cwd: &Path, args: &[&str]| {
         Command::new(CLI)
             .current_dir(cwd)
+            .env("HOME", &service_home)
             .env("XDG_CONFIG_HOME", &config_home)
+            .env("XDG_STATE_HOME", &service_state)
+            .env("XDG_DATA_HOME", &service_data)
+            .env("TRUESPEC_SERVICE_PORT", "0")
             .args(args)
             .output()
             .unwrap()
@@ -681,21 +705,30 @@ fn init_detects_sources_requires_the_root_and_preserves_state() {
     let config = fs::read_to_string(markdown_root.join("truespec/config/project.json")).unwrap();
     assert!(config.contains(r#""adapter": "markdown""#));
     assert!(config.contains(r#""path": "documentation""#));
+    assert!(run(root, &["down", "--json"]).status.success());
 }
 
 #[test]
 fn init_installs_and_protects_the_complete_opencode_bundle() {
     let fixture = tempfile::tempdir().unwrap();
-    let root = fixture.path().join("workspace");
+    let fixture_root = fixture.path().canonicalize().unwrap();
+    let root = fixture_root.join("workspace");
     fs::create_dir_all(root.join(".git")).unwrap();
     write(&root, "guide.md", "# Guide\n");
-    let config = fixture.path().join("config");
+    let config = fixture_root.join("config");
+    let state = fixture_root.join("state");
+    let data = fixture_root.join("data");
+    let home = fixture_root.join("home");
     let install = |force| {
         let mut command = Command::new(CLI);
         command
             .current_dir(&root)
             .args(["init", "--source", "markdown", "--integration", "opencode"])
+            .env("HOME", &home)
             .env("XDG_CONFIG_HOME", &config)
+            .env("XDG_STATE_HOME", &state)
+            .env("XDG_DATA_HOME", &data)
+            .env("TRUESPEC_SERVICE_PORT", "0")
             .env("PATH", "");
         if force {
             command.arg("--force");
@@ -713,6 +746,11 @@ fn init_installs_and_protects_the_complete_opencode_bundle() {
     let generated_plugin = fs::read_to_string(&plugin).unwrap();
     let generated_skill = fs::read_to_string(&skill).unwrap();
     assert!(!generated_plugin.contains("__TRUESPEC_INSTALLED_BINARY__"));
+    assert!(generated_plugin.contains("const PROTOCOL = 2"));
+    assert!(!generated_plugin.contains("\"serve\""));
+    assert!(!generated_plugin.contains("viewerByWorkspace"));
+    assert!(generated_plugin.contains("output.url"));
+    assert!(generated_plugin.contains("truespec init --integration opencode --force"));
     assert!(
         generated_plugin.contains(&Path::new(CLI).canonicalize().unwrap().display().to_string())
     );
@@ -744,36 +782,99 @@ fn init_installs_and_protects_the_complete_opencode_bundle() {
     assert_eq!(fs::read_to_string(&skill).unwrap(), "user-owned skill\n");
     assert!(install(true).status.success());
     assert_eq!(fs::read_to_string(&skill).unwrap(), generated_skill);
+    assert!(
+        Command::new(CLI)
+            .args(["down", "--json"])
+            .env("HOME", &home)
+            .env("XDG_CONFIG_HOME", &config)
+            .env("XDG_STATE_HOME", &state)
+            .env("XDG_DATA_HOME", &data)
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
 }
 
 #[test]
-fn reset_state_starts_fresh_without_touching_documents_or_config() {
+fn init_refuses_older_state_and_resets_it_only_when_explicit() {
     let fixture = tempfile::tempdir().unwrap();
     let root = fixture.path();
-    let document = "docs/guide.md";
-    write(root, document, "# Guide\n\nReview this.\n");
-    write(root, "truespec/config/truespec.yaml", "source: markdown\n");
-    let mut first = Viewer::start(root, "markdown", "docs", false);
-    let docs = first.get("/api/documents");
-    let id = doc_id(&docs, document);
-    first.add(id, 3, "This draft should be reset.");
-    let previous_review = first.review.clone();
-    assert_eq!(first.board()["comments"].as_array().unwrap().len(), 1);
-    first.stop();
+    fs::create_dir(root.join(".git")).unwrap();
+    write(root, "docs/guide.md", "# Guide\n");
+    fs::create_dir_all(root.join("truespec/.state")).unwrap();
+    let database = root.join("truespec/.state/review.sqlite3");
+    let legacy = rusqlite::Connection::open(&database).unwrap();
+    legacy
+        .execute_batch(include_str!("../src/schema.sql"))
+        .unwrap();
+    legacy
+        .execute(
+            "INSERT INTO sessions (id, started_at) VALUES ('old-review', 1)",
+            [],
+        )
+        .unwrap();
+    drop(legacy);
+    let args = [
+        "init",
+        "--source",
+        "markdown",
+        "--source-path",
+        "docs",
+        "--integration",
+        "opencode",
+    ];
+    let refused = configured_command(root, &args).output().unwrap();
+    assert!(!refused.status.success());
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("init --reset-state"));
+    let legacy = rusqlite::Connection::open(&database).unwrap();
+    assert_eq!(
+        legacy
+            .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        legacy
+            .query_row("SELECT id FROM sessions", [], |row| row.get::<_, String>(0))
+            .unwrap(),
+        "old-review"
+    );
+    drop(legacy);
 
-    let mut reset = Viewer::start(root, "markdown", "docs", true);
-    assert_ne!(reset.review, previous_review);
-    assert!(reset.board()["comments"].as_array().unwrap().is_empty());
+    let mut reset_args = args.to_vec();
+    reset_args.push("--reset-state");
+    let reset = configured_command(root, &reset_args).output().unwrap();
+    assert!(
+        reset.status.success(),
+        "{}",
+        String::from_utf8_lossy(&reset.stderr)
+    );
+    assert!(String::from_utf8_lossy(&reset.stderr).contains("permanently deleted"));
+    let fresh = rusqlite::Connection::open(&database).unwrap();
     assert_eq!(
-        fs::read_to_string(root.join(document)).unwrap(),
-        "# Guide\n\nReview this.\n"
+        fresh
+            .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+            .unwrap(),
+        5
     );
     assert_eq!(
-        fs::read_to_string(root.join("truespec/config/truespec.yaml")).unwrap(),
-        "source: markdown\n"
+        fresh
+            .query_row("SELECT COUNT(*) FROM sessions", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        0
     );
-    assert!(root.join("truespec/.state/review.sqlite3").is_file());
-    reset.stop();
+    assert_eq!(
+        fresh
+            .query_row("SELECT COUNT(*) FROM workspace_identity", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap(),
+        1
+    );
+    drop(fresh);
+    command(root, &["down", "--json"], true);
 }
 
 #[test]
@@ -781,7 +882,7 @@ fn previously_saved_section_drafts_can_still_be_submitted() {
     let fixture = tempfile::tempdir().unwrap();
     let root = fixture.path();
     write(root, "guide.md", "# Guide\n\nOriginal context.");
-    let mut viewer = Viewer::start(root, "markdown", ".", false);
+    let mut viewer = Viewer::start(root, "markdown", ".");
     let binding = attach(root, "saved-section-chat");
     let docs = viewer.get("/api/documents");
     let document_id = doc_id(&docs, "guide.md");
@@ -828,28 +929,164 @@ fn previously_saved_section_drafts_can_still_be_submitted() {
 }
 
 #[test]
+fn connector_accepts_a_maximum_size_reply_through_the_control_plane() {
+    let fixture = tempfile::tempdir().unwrap();
+    let root = fixture.path();
+    write(root, "guide.md", "# Guide\n");
+    let mut viewer = Viewer::start(root, "markdown", ".");
+    let binding = attach(root, "large-reply-chat");
+    let [document] = viewer
+        .get("/api/documents")
+        .as_array()
+        .unwrap()
+        .clone()
+        .try_into()
+        .unwrap();
+    let comment = viewer.add(string(&document["id"]), 1, "Reply with the full result.");
+    let submitted = viewer.post(
+        &viewer.api("/submit"),
+        200,
+        json!({
+            "key": Uuid::new_v4(),
+            "end": true,
+            "drafts": [{ "id": comment, "version": 1 }],
+        }),
+    );
+    let envelope = connector_poll(root, string(&binding["connection_id"]), "0");
+    command(
+        root,
+        &[
+            "connector",
+            "delivered",
+            string(&submitted["batch_id"]),
+            "--connection",
+            string(&binding["connection_id"]),
+            "--lease",
+            string(&envelope["lease"]),
+            "--receipt",
+            "large-reply-receipt",
+        ],
+        true,
+    );
+    fs::write(root.join("large-reply.md"), "x".repeat(1024 * 1024)).unwrap();
+    command(
+        root,
+        &[
+            "connector",
+            "respond",
+            string(&submitted["batch_id"]),
+            "--connection",
+            string(&binding["connection_id"]),
+            "--reply-id",
+            "large-reply",
+            "--body-file",
+            "large-reply.md",
+        ],
+        true,
+    );
+    assert_eq!(
+        viewer.board()["replies"][0]["body"].as_str().unwrap().len(),
+        1024 * 1024
+    );
+    viewer.stop();
+}
+
+#[test]
+fn connector_delivery_survives_a_temporarily_unavailable_source_tree() {
+    let fixture = tempfile::tempdir().unwrap();
+    let root = fixture.path();
+    write(root, "docs/guide.md", "# Guide\n");
+    let mut viewer = Viewer::start(root, "markdown", "docs");
+    let binding = attach(root, "source-outage-chat");
+    let docs = viewer.get("/api/documents");
+    let comment = viewer.add(
+        doc_id(&docs, "docs/guide.md"),
+        1,
+        "Handle this during an outage.",
+    );
+    let submitted = viewer.post(
+        &viewer.api("/submit"),
+        200,
+        json!({
+            "key": Uuid::new_v4(),
+            "end": true,
+            "drafts": [{ "id": comment, "version": 1 }],
+        }),
+    );
+    viewer.stop();
+    fs::rename(root.join("docs"), root.join("docs-offline")).unwrap();
+
+    let first = connector_poll(root, string(&binding["connection_id"]), "0");
+    command(
+        root,
+        &[
+            "connector",
+            "defer",
+            string(&submitted["batch_id"]),
+            "--connection",
+            string(&binding["connection_id"]),
+            "--lease",
+            string(&first["lease"]),
+            "--retry-after",
+            "1",
+        ],
+        true,
+    );
+    std::thread::sleep(Duration::from_millis(1_100));
+    let retried = connector_poll(root, string(&binding["connection_id"]), "2");
+    command(
+        root,
+        &[
+            "connector",
+            "delivered",
+            string(&submitted["batch_id"]),
+            "--connection",
+            string(&binding["connection_id"]),
+            "--lease",
+            string(&retried["lease"]),
+            "--receipt",
+            "source-outage-receipt",
+        ],
+        true,
+    );
+    write(
+        root,
+        "source-outage-reply.md",
+        "Handled while the source was unavailable.\n",
+    );
+    command(
+        root,
+        &[
+            "connector",
+            "respond",
+            string(&submitted["batch_id"]),
+            "--connection",
+            string(&binding["connection_id"]),
+            "--reply-id",
+            "source-outage-reply",
+            "--body-file",
+            "source-outage-reply.md",
+        ],
+        true,
+    );
+
+    fs::rename(root.join("docs-offline"), root.join("docs")).unwrap();
+    let mut restored = Viewer::start(root, "markdown", "docs");
+    assert_eq!(
+        restored.board()["replies"][0]["body"],
+        "Handled while the source was unavailable.\n"
+    );
+    restored.stop();
+}
+
+#[test]
 fn a_versioned_connector_owns_its_batches_across_review_rounds() {
     let fixture = tempfile::tempdir().unwrap();
     let root = fixture.path();
     let path = "openspec/specs/reader/spec.md";
     write(root, path, "# Reader\n\nOriginal text.\n");
     fs::create_dir(root.join(".git")).unwrap();
-    fs::create_dir_all(root.join("truespec/.state")).unwrap();
-    {
-        let legacy =
-            rusqlite::Connection::open(root.join("truespec/.state/review.sqlite3")).unwrap();
-        legacy
-            .execute_batch(include_str!("../src/schema.sql"))
-            .unwrap();
-        legacy
-            .execute(
-                "INSERT INTO sessions (id, started_at) VALUES ('legacy-review', 1)",
-                [],
-            )
-            .unwrap();
-    }
-    let mut viewer = Viewer::start(root, "openspec", "openspec", false);
-    assert_eq!(viewer.review, "legacy-review");
+    let mut viewer = Viewer::start(root, "openspec", "openspec");
     let docs = viewer.get("/api/documents");
     let id = doc_id(&docs, path);
     let add_and_submit = |body: &str, end: bool| {
@@ -869,7 +1106,7 @@ fn a_versioned_connector_owns_its_batches_across_review_rounds() {
             &[
                 "connector",
                 "--protocol",
-                "1",
+                "2",
                 "attach",
                 "--kind",
                 "test-harness",
@@ -882,7 +1119,7 @@ fn a_versioned_connector_owns_its_batches_across_review_rounds() {
         )
     };
     let binding: Value = serde_json::from_str(&attach(root, "test-chat", true)).unwrap();
-    assert_eq!(binding["protocol_version"], 1);
+    assert_eq!(binding["protocol_version"], 2);
     assert_eq!(binding["review_id"], viewer.review);
     assert_eq!(
         serde_json::from_str::<Value>(&attach(root, "test-chat", true)).unwrap(),

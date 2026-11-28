@@ -2,6 +2,10 @@ use std::{
     collections::HashMap,
     fs,
     path::{Path, PathBuf},
+    sync::{
+        Arc, Mutex, MutexGuard,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -15,19 +19,21 @@ use uuid::Uuid;
 use crate::anchor::{Anchor, Status};
 
 const STORE_PATH: &str = "truespec/.state/review.sqlite3";
-const STATE_PATH: &str = "truespec/.state";
 const GENERAL_DOCUMENT_ID: &str = "truespec-general-feedback";
 const GENERAL_DOCUMENT_PATH: &str = "@truespec/general-feedback";
 const SCHEMA: &str = include_str!("schema.sql");
 const CONNECTOR_MIGRATION: &str = include_str!("schema-v2.sql");
 const FEED_MIGRATION: &str = include_str!("schema-v3.sql");
 const MANUAL_REPLY_MIGRATION: &str = include_str!("schema-v4.sql");
+const WORKSPACE_IDENTITY_MIGRATION: &str = include_str!("schema-v5.sql");
 
 #[derive(Debug)]
 pub enum Problem {
     Invalid(String),
     Missing(&'static str),
     Conflict(String),
+    Unavailable(&'static str),
+    Unauthorized(&'static str),
     Confirm {
         message: String,
         confirmation: String,
@@ -40,12 +46,27 @@ impl std::fmt::Display for Problem {
             Self::Invalid(s) | Self::Conflict(s) | Self::Confirm { message: s, .. } => {
                 f.write_str(s)
             }
-            Self::Missing(s) => f.write_str(s),
+            Self::Missing(s) | Self::Unavailable(s) | Self::Unauthorized(s) => f.write_str(s),
         }
     }
 }
 
 impl std::error::Error for Problem {}
+
+#[derive(Debug)]
+pub struct UnsupportedDatabaseVersion(pub i64);
+
+impl std::fmt::Display for UnsupportedDatabaseVersion {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "TrueSpec database version {} is unsupported. Run `truespec init --reset-state` to discard local review state and start fresh.",
+            self.0
+        )
+    }
+}
+
+impl std::error::Error for UnsupportedDatabaseVersion {}
 
 pub fn invalid(message: impl Into<String>) -> anyhow::Error {
     Problem::Invalid(message.into()).into()
@@ -56,35 +77,106 @@ pub fn conflict(message: impl Into<String>) -> anyhow::Error {
 }
 
 #[derive(Clone)]
-pub struct Store(PathBuf);
+pub struct Store {
+    path: PathBuf,
+    connection: Arc<Mutex<Connection>>,
+    identity: (u64, u64),
+    open_review: Arc<AtomicBool>,
+}
 
-pub fn reset_state(root: &Path) -> Result<()> {
+pub(crate) struct QuarantinedState {
+    state: PathBuf,
+    quarantine: Option<PathBuf>,
+}
+
+#[cfg(test)]
+pub fn reset_state(root: &Path) -> Result<bool> {
+    let mut state = quarantine_state(root)?;
+    let (reset, cleanup_failed) = state.commit();
+    ensure!(
+        !cleanup_failed,
+        "Fresh state is active but quarantine cleanup was incomplete"
+    );
+    Ok(reset)
+}
+
+#[cfg(test)]
+pub fn validate_reset_state(root: &Path) -> Result<bool> {
+    Ok(reset_state_path(root)?.is_some())
+}
+
+pub(crate) fn quarantine_state(root: &Path) -> Result<QuarantinedState> {
+    let root = root
+        .canonicalize()
+        .with_context(|| format!("Cannot find workspace {}", root.display()))?;
+    let state = root.join("truespec/.state");
+    let quarantine = if reset_state_path(&root)?.is_some() {
+        let quarantine = root.join(format!("truespec/.state-reset-{}", new_id()));
+        fs::rename(&state, &quarantine).context("Cannot quarantine TrueSpec review state")?;
+        Some(quarantine)
+    } else {
+        None
+    };
+    Ok(QuarantinedState { state, quarantine })
+}
+
+impl QuarantinedState {
+    pub(crate) fn commit(&mut self) -> (bool, bool) {
+        self.commit_with(|path| fs::remove_dir_all(path))
+    }
+
+    fn commit_with(&mut self, delete: impl FnOnce(&Path) -> std::io::Result<()>) -> (bool, bool) {
+        let Some(quarantine) = self.quarantine.as_ref() else {
+            return (false, false);
+        };
+        let cleanup_failed = delete(quarantine).is_err();
+        self.quarantine = None;
+        (true, cleanup_failed)
+    }
+
+    pub(crate) fn rollback(&mut self) -> Result<()> {
+        if fs::symlink_metadata(&self.state).is_ok() {
+            let state = reset_state_path(
+                self.state
+                    .parent()
+                    .and_then(Path::parent)
+                    .context("TrueSpec state path is invalid")?,
+            )?;
+            if let Some(state) = state {
+                fs::remove_dir_all(state).context("Cannot remove fresh TrueSpec review state")?;
+            }
+        }
+        if let Some(quarantine) = self.quarantine.take() {
+            fs::rename(quarantine, &self.state)
+                .context("Cannot restore quarantined TrueSpec review state")?;
+        }
+        Ok(())
+    }
+}
+
+fn reset_state_path(root: &Path) -> Result<Option<PathBuf>> {
     let root = root
         .canonicalize()
         .with_context(|| format!("Cannot find workspace {}", root.display()))?;
     ensure!(root.is_dir(), "Workspace must be a directory");
     let truespec = root.join("truespec");
-    let state = root.join(STATE_PATH);
+    let state = root.join("truespec/.state");
     let metadata = match fs::symlink_metadata(&state) {
         Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            eprintln!("TrueSpec state is already empty: {}", state.display());
-            return Ok(());
-        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(error).context("Cannot inspect TrueSpec state"),
     };
     ensure!(
         metadata.is_dir() && !metadata.file_type().is_symlink(),
-        "Refusing to reset a TrueSpec state path that is not a real directory: {}",
-        state.display()
+        "Refusing to reset a TrueSpec state path that is not a real directory"
     );
     ensure!(
-        truespec.canonicalize()? == truespec && state.canonicalize()? == state,
+        truespec.canonicalize()? == truespec
+            && state.canonicalize()? == state
+            && state.starts_with(&root),
         "Refusing to reset TrueSpec state through a symlink"
     );
-    eprintln!("Removing TrueSpec state: {}", state.display());
-    fs::remove_dir_all(&state).context("Cannot remove TrueSpec state")?;
-    Ok(())
+    Ok(Some(state))
 }
 
 pub fn now() -> i64 {
@@ -227,62 +319,85 @@ impl Store {
                 "Invalid TrueSpec database path"
             );
         }
-        let store = Self(path);
-        let mut con = store.connection(create)?;
+        let mut con = open_connection(&path, create)?;
         let version = con.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))?;
         if version == 0 && create {
             con.pragma_update(None, "journal_mode", "WAL")?;
         }
-        if version != 4 {
-            let tx = con.transaction_with_behavior(Immediate)?;
-            match tx.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))? {
-                0 if create => {
-                    tx.execute_batch(SCHEMA)?;
-                    tx.execute_batch(CONNECTOR_MIGRATION)?;
-                    tx.execute_batch(FEED_MIGRATION)?;
-                    tx.execute_batch(MANUAL_REPLY_MIGRATION)?;
-                }
-                1 => {
-                    tx.execute_batch(CONNECTOR_MIGRATION)?;
-                    tx.execute_batch(FEED_MIGRATION)?;
-                    tx.execute_batch(MANUAL_REPLY_MIGRATION)?;
-                }
-                2 => {
-                    tx.execute_batch(FEED_MIGRATION)?;
-                    tx.execute_batch(MANUAL_REPLY_MIGRATION)?;
-                }
-                3 => tx.execute_batch(MANUAL_REPLY_MIGRATION)?,
-                4 => {}
-                version => anyhow::bail!("Unsupported TrueSpec database version {version}"),
+        match version {
+            0 if create => {
+                let tx = con.transaction_with_behavior(Immediate)?;
+                tx.execute_batch(SCHEMA)?;
+                tx.execute_batch(CONNECTOR_MIGRATION)?;
+                tx.execute_batch(FEED_MIGRATION)?;
+                tx.execute_batch(MANUAL_REPLY_MIGRATION)?;
+                tx.execute_batch(WORKSPACE_IDENTITY_MIGRATION)?;
+                insert_workspace_identity(&tx)?;
+                tx.commit()?;
             }
-            tx.commit()?;
+            5 => {}
+            version => return Err(UnsupportedDatabaseVersion(version).into()),
         }
-        Ok(store)
+        validate_store_path(&path)?;
+        read_workspace_id(&con)?;
+        let open_review = con.query_row(
+            "SELECT EXISTS (SELECT 1 FROM sessions WHERE ended_at IS NULL)",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(Self {
+            identity: file_identity(&path)?,
+            path,
+            connection: Arc::new(Mutex::new(con)),
+            open_review: Arc::new(AtomicBool::new(open_review)),
+        })
     }
 
-    fn connection(&self, create: bool) -> Result<Connection> {
-        let flags = OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX;
-        let flags = if create {
-            flags | OpenFlags::SQLITE_OPEN_CREATE
-        } else {
-            flags
-        };
-        let con = Connection::open_with_flags(&self.0, flags)?;
-        con.busy_timeout(Duration::from_secs(5))?;
-        con.pragma_update(None, "foreign_keys", "ON")?;
-        con.pragma_update(None, "synchronous", "FULL")?;
-        Ok(con)
+    fn connection(&self) -> Result<MutexGuard<'_, Connection>> {
+        validate_store_path(&self.path)?;
+        ensure!(
+            file_identity(&self.path)? == self.identity,
+            "TrueSpec database file changed after it was opened"
+        );
+        self.connection
+            .lock()
+            .map_err(|_| anyhow::anyhow!("TrueSpec database connection is unavailable"))
     }
 
-    pub(crate) fn connect(&self) -> Result<Connection> {
-        self.connection(false)
+    pub(crate) fn connect(&self) -> Result<MutexGuard<'_, Connection>> {
+        self.connection()
+    }
+
+    pub fn workspace_id(&self) -> Result<String> {
+        let connection = self.connect()?;
+        read_workspace_id(&connection)
+    }
+
+    pub fn has_open_review(&self) -> Result<bool> {
+        Ok(self.open_review.load(Ordering::Acquire))
+    }
+
+    fn refresh_open_review(&self) -> Result<()> {
+        let open = self.connect()?.query_row(
+            "SELECT EXISTS (SELECT 1 FROM sessions WHERE ended_at IS NULL)",
+            [],
+            |row| row.get(0),
+        )?;
+        self.open_review.store(open, Ordering::Release);
+        Ok(())
+    }
+
+    pub(crate) fn is_for_root(&self, root: &Path) -> bool {
+        self.path == root.join(STORE_PATH)
+            && validate_store_path(&self.path).is_ok()
+            && file_identity(&self.path).is_ok_and(|identity| identity == self.identity)
     }
 
     pub(crate) fn write<T>(
         &self,
         execute: impl FnOnce(&Transaction<'_>) -> Result<T>,
     ) -> Result<T> {
-        let mut con = self.connect()?;
+        let mut con = self.connection()?;
         let tx = con.transaction_with_behavior(Immediate)?;
         let result = execute(&tx)?;
         tx.commit()?;
@@ -290,24 +405,32 @@ impl Store {
     }
 
     pub fn current_session(&self) -> Result<Session> {
-        if let Some(session) = current(&self.connect()?)? {
+        let existing = {
+            let connection = self.connect()?;
+            current(&connection)?
+        };
+        if let Some(session) = existing {
+            self.refresh_open_review()?;
             return Ok(session);
         }
-        self.write(|tx| match current(tx)? {
+        let session = self.write(|tx| match current(tx)? {
             Some(session) => Ok(session),
             None => create_review(tx),
-        })
+        })?;
+        self.refresh_open_review()?;
+        Ok(session)
     }
 
     pub fn session(&self, id: &str) -> Result<Session> {
-        read_session(&self.connect()?, id)
+        let connection = self.connect()?;
+        read_session(&connection, id)
     }
 
     pub fn bind_connector(&self, kind: &str, destination: &str, label: &str) -> Result<Binding> {
         validate_connector_text("Connector kind", kind, 64)?;
         validate_connector_text("Destination", destination, 1024)?;
         validate_connector_text("Connector label", label, 96)?;
-        self.write(|tx| {
+        let binding = self.write(|tx| {
             let review = match current(tx)? {
                 Some(review) if !review.ended => review,
                 _ => create_review(tx)?,
@@ -343,7 +466,9 @@ impl Store {
                 params![connection_id, review.id],
             )?;
             Ok(Binding { connection_id, review_id: review.id })
-        })
+        })?;
+        self.refresh_open_review()?;
+        Ok(binding)
     }
 
     pub fn connector_review(&self, connection_id: &str) -> Result<String> {
@@ -358,7 +483,7 @@ impl Store {
     }
 
     pub fn next_session(&self, previous: &str) -> Result<Session> {
-        self.write(|tx| {
+        let session = self.write(|tx| {
             let latest = current(tx)?.ok_or(Problem::Missing("Review not found."))?;
             if latest.id != previous {
                 return Err(conflict(
@@ -369,7 +494,9 @@ impl Store {
                 return Err(conflict("End this review before starting a new one."));
             }
             create_review(tx)
-        })
+        })?;
+        self.refresh_open_review()?;
+        Ok(session)
     }
 
     pub fn end_session(&self, id: &str, keep_drafts: bool) -> Result<()> {
@@ -382,7 +509,9 @@ impl Store {
                 return Err(conflict("There are unsent drafts. Confirm that you want to keep them for a later review."));
             }
             end_review(tx, id)
-        })
+        })?;
+        self.refresh_open_review()?;
+        Ok(())
     }
 
     pub fn register<'a>(
@@ -607,7 +736,8 @@ impl Store {
     }
 
     pub fn submitted(&self, session: &str, request: &Submission) -> Result<Option<Submitted>> {
-        replay(&self.connect()?, session, request)
+        let connection = self.connect()?;
+        replay(&connection, session, request)
     }
 
     pub fn submit(
@@ -616,7 +746,7 @@ impl Store {
         request: &Submission,
         items: &[BatchItem],
     ) -> Result<Submitted> {
-        self.write(|tx| {
+        let submitted = self.write(|tx| {
             if let Some(submitted) = replay(tx, session, request)? {
                 return Ok(submitted);
             }
@@ -691,8 +821,91 @@ impl Store {
                 end_review(tx, session)?;
             }
             Ok(Submitted { batch_id, count: item_count, ended: request.end })
-        })
+        })?;
+        self.refresh_open_review()?;
+        Ok(submitted)
     }
+}
+
+fn validate_store_path(path: &Path) -> Result<()> {
+    let parent = path
+        .parent()
+        .context("TrueSpec database path has no parent directory")?;
+    let parent_metadata = fs::symlink_metadata(parent)?;
+    ensure!(
+        parent_metadata.is_dir()
+            && !parent_metadata.file_type().is_symlink()
+            && parent.canonicalize()? == parent,
+        "TrueSpec state directory must not be a symlink"
+    );
+    if let Ok(metadata) = fs::symlink_metadata(path) {
+        ensure!(
+            metadata.is_file()
+                && !metadata.file_type().is_symlink()
+                && path.canonicalize()? == path,
+            "Invalid TrueSpec database path"
+        );
+    }
+    Ok(())
+}
+
+fn insert_workspace_identity(tx: &Transaction<'_>) -> Result<()> {
+    tx.execute(
+        "INSERT INTO workspace_identity (singleton, id) VALUES (1, ?1)",
+        [new_id()],
+    )?;
+    Ok(())
+}
+
+fn read_workspace_id(connection: &Connection) -> Result<String> {
+    let id: String = connection
+        .query_row(
+            "SELECT id FROM workspace_identity WHERE singleton = 1",
+            [],
+            |row| row.get(0),
+        )
+        .context("TrueSpec workspace identity is missing")?;
+    let parsed = Uuid::parse_str(&id).context("TrueSpec workspace identity is invalid")?;
+    ensure!(
+        parsed.hyphenated().to_string() == id,
+        "TrueSpec workspace identity must be a canonical lowercase UUID"
+    );
+    Ok(id)
+}
+
+fn open_connection(path: &Path, create: bool) -> Result<Connection> {
+    let flags = OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_FULL_MUTEX;
+    let flags = if create {
+        flags | OpenFlags::SQLITE_OPEN_CREATE
+    } else {
+        flags
+    };
+    let connection = Connection::open_with_flags(path, flags)?;
+    connection.busy_timeout(Duration::from_secs(5))?;
+    connection.pragma_update(None, "foreign_keys", "ON")?;
+    connection.pragma_update(None, "synchronous", "FULL")?;
+    Ok(connection)
+}
+
+#[cfg(unix)]
+fn file_identity(path: &Path) -> Result<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt;
+
+    let metadata = fs::metadata(path)?;
+    Ok((metadata.dev(), metadata.ino()))
+}
+
+#[cfg(not(unix))]
+fn file_identity(path: &Path) -> Result<(u64, u64)> {
+    let metadata = fs::metadata(path)?;
+    let modified = metadata
+        .modified()?
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
+    Ok((
+        metadata.len(),
+        u64::try_from(modified.as_nanos()).unwrap_or(u64::MAX),
+    ))
 }
 
 fn insert_general_comment(tx: &Connection, body: &str, batch_id: Option<&str>) -> Result<String> {
@@ -890,117 +1103,160 @@ mod tests {
     use super::*;
 
     #[test]
-    fn migration_from_v3_preserves_replies_and_allows_manual_rows() {
+    fn older_database_versions_are_refused_without_mutation() {
         let fixture = tempfile::tempdir().unwrap();
         let root = fixture.path().canonicalize().unwrap();
-        fs::create_dir_all(root.join(STATE_PATH)).unwrap();
+        fs::create_dir_all(root.join("truespec/.state")).unwrap();
         let path = root.join(STORE_PATH);
         let connection = Connection::open(&path).unwrap();
-        connection
-            .pragma_update(None, "foreign_keys", "ON")
-            .unwrap();
         connection.execute_batch(SCHEMA).unwrap();
-        connection.execute_batch(CONNECTOR_MIGRATION).unwrap();
-        connection.execute_batch(FEED_MIGRATION).unwrap();
         connection
             .execute(
-                "INSERT INTO sessions (id, started_at) VALUES ('review', 1)",
-                [],
-            )
-            .unwrap();
-        connection
-            .execute(
-                "INSERT INTO review_connectors (id, session_id, kind, destination, label)
-                 VALUES ('connection', 'review', 'test', 'chat', 'Test')",
-                [],
-            )
-            .unwrap();
-        connection
-            .execute(
-                "INSERT INTO batches
-                 (id, session_id, request_key, request, ended, created, item_count,
-                  connector_id, connector_receipt)
-                 VALUES ('batch', 'review', 'request', '{}', 0, 2, 1,
-                         'connection', 'receipt')",
-                [],
-            )
-            .unwrap();
-        connection
-            .execute(
-                "INSERT INTO agent_replies
-                 (id, batch_id, connector_id, body, created_at)
-                 VALUES ('reply', 'batch', 'connection', 'Preserved reply.', 3)",
-                [],
-            )
-            .unwrap();
-        connection
-            .execute(
-                "INSERT INTO review_feed (kind, reference_id)
-                 VALUES ('agent_reply', 'reply')",
+                "INSERT INTO sessions (id, started_at) VALUES ('preserved-review', 1)",
                 [],
             )
             .unwrap();
         drop(connection);
 
-        let store = Store::open(&root, false).unwrap();
-        let connection = store.connect().unwrap();
+        let error = Store::open(&root, false).err().unwrap().to_string();
+        assert!(error.contains("init --reset-state"));
+        let connection = Connection::open(path).unwrap();
         assert_eq!(
             connection
                 .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
                 .unwrap(),
-            4
+            1
         );
         assert_eq!(
             connection
-                .query_row(
-                    "SELECT connector_id, body FROM agent_replies WHERE id = 'reply'",
-                    [],
-                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
-                )
+                .query_row("SELECT id FROM sessions", [], |row| row.get::<_, String>(0))
                 .unwrap(),
-            ("connection".into(), "Preserved reply.".into())
+            "preserved-review"
         );
-        assert_eq!(
-            connection
-                .query_row(
-                    "SELECT kind, reference_id FROM review_feed
-                     WHERE reference_id = 'reply'",
-                    [],
-                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
-                )
-                .unwrap(),
-            ("agent_reply".into(), "reply".into())
-        );
-        let connector_required = connection
-            .prepare("PRAGMA table_info(agent_replies)")
-            .unwrap()
-            .query_map([], |row| {
-                Ok((row.get::<_, String>(1)?, row.get::<_, i64>(3)?))
+    }
+
+    #[test]
+    fn a_new_database_initializes_the_workspace_identity_once() {
+        let fixture = tempfile::tempdir().unwrap();
+        let root = fixture.path().canonicalize().unwrap();
+        let first = Store::open(&root, true).unwrap().workspace_id().unwrap();
+        let second = Store::open(&root, true).unwrap().workspace_id().unwrap();
+        assert_eq!(first, second);
+        assert!(Uuid::parse_str(&first).is_ok());
+    }
+
+    #[test]
+    fn persisted_workspace_identity_must_be_a_canonical_lowercase_uuid() {
+        let fixture = tempfile::tempdir().unwrap();
+        let root = fixture.path().canonicalize().unwrap();
+        let store = Store::open(&root, true).unwrap();
+        let uppercase = store.workspace_id().unwrap().to_uppercase();
+        store
+            .write(|tx| {
+                tx.execute(
+                    "UPDATE workspace_identity SET id = ?1 WHERE singleton = 1",
+                    [&uppercase],
+                )?;
+                Ok(())
             })
-            .unwrap()
-            .collect::<rusqlite::Result<Vec<_>>>()
-            .unwrap()
-            .into_iter()
-            .find(|(name, _)| name == "connector_id")
-            .unwrap()
-            .1;
-        assert_eq!(connector_required, 0);
-        connection
-            .execute(
-                "INSERT INTO batches
-                 (id, session_id, request_key, request, ended, created, item_count)
-                 VALUES ('manual-batch', 'review', 'manual-request', '{}', 0, 4, 1)",
-                [],
-            )
             .unwrap();
-        connection
-            .execute(
-                "INSERT INTO agent_replies
-                 (id, batch_id, connector_id, body, created_at)
-                 VALUES ('manual-reply', 'manual-batch', NULL, 'Manual reply.', 5)",
-                [],
-            )
-            .unwrap();
+        assert!(store.workspace_id().is_err());
+        drop(store);
+        assert!(Store::open(&root, false).is_err());
+        let connection = Connection::open(root.join(STORE_PATH)).unwrap();
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM sessions", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn historical_end_retry_does_not_clear_a_new_open_review() {
+        let fixture = tempfile::tempdir().unwrap();
+        let root = fixture.path().canonicalize().unwrap();
+        let store = Store::open(&root, true).unwrap();
+        let first = store.current_session().unwrap();
+        store.end_session(&first.id, true).unwrap();
+        let second = store.next_session(&first.id).unwrap();
+        assert!(store.has_open_review().unwrap());
+        store.end_session(&first.id, true).unwrap();
+        assert!(store.has_open_review().unwrap());
+        assert!(!store.session(&second.id).unwrap().ended);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cached_store_rejects_a_symlinked_state_directory_swap() {
+        let fixture = tempfile::tempdir().unwrap();
+        let root = fixture.path().canonicalize().unwrap();
+        let store = Store::open(&root, true).unwrap();
+        fs::rename(
+            root.join("truespec/.state"),
+            root.join("truespec/.state-real"),
+        )
+        .unwrap();
+        symlink(
+            root.join("truespec/.state-real"),
+            root.join("truespec/.state"),
+        )
+        .unwrap();
+        assert!(store.workspace_id().is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reset_refuses_a_symlinked_state_directory() {
+        let fixture = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let root = fixture.path().canonicalize().unwrap();
+        fs::create_dir(root.join("truespec")).unwrap();
+        fs::write(outside.path().join("keep"), "preserved").unwrap();
+        symlink(outside.path(), root.join("truespec/.state")).unwrap();
+        assert!(reset_state(&root).is_err());
+        assert_eq!(
+            fs::read_to_string(outside.path().join("keep")).unwrap(),
+            "preserved"
+        );
+    }
+
+    #[test]
+    fn quarantined_state_can_restore_after_fresh_state_preparation_fails() {
+        let fixture = tempfile::tempdir().unwrap();
+        let root = fixture.path().canonicalize().unwrap();
+        let original = Store::open(&root, true).unwrap().workspace_id().unwrap();
+        let mut quarantine = quarantine_state(&root).unwrap();
+        let fresh = Store::open(&root, true).unwrap().workspace_id().unwrap();
+        assert_ne!(fresh, original);
+        quarantine.rollback().unwrap();
+        assert_eq!(
+            Store::open(&root, false).unwrap().workspace_id().unwrap(),
+            original
+        );
+    }
+
+    #[test]
+    fn cleanup_failure_never_restores_partially_deleted_quarantine() {
+        let fixture = tempfile::tempdir().unwrap();
+        let root = fixture.path().canonicalize().unwrap();
+        let original = Store::open(&root, true).unwrap().workspace_id().unwrap();
+        let mut quarantine = quarantine_state(&root).unwrap();
+        let quarantine_path = quarantine.quarantine.clone().unwrap();
+        let fresh = Store::open(&root, true).unwrap().workspace_id().unwrap();
+        assert_ne!(fresh, original);
+        let (reset, cleanup_incomplete) = quarantine.commit_with(|path| {
+            fs::remove_file(path.join("review.sqlite3"))?;
+            Err(std::io::Error::other("simulated cleanup failure"))
+        });
+        assert!(reset);
+        assert!(cleanup_incomplete);
+        assert!(quarantine_path.is_dir());
+        assert_eq!(
+            Store::open(&root, false).unwrap().workspace_id().unwrap(),
+            fresh
+        );
     }
 
     #[test]
@@ -1323,24 +1579,6 @@ mod tests {
                     .get::<_, i64>(0))
                 .unwrap(),
             batches_before
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn reset_refuses_a_symlinked_state_directory() {
-        let fixture = tempfile::tempdir().unwrap();
-        let root = fixture.path().canonicalize().unwrap();
-        let outside = root.join("outside");
-        fs::create_dir_all(root.join("truespec")).unwrap();
-        fs::create_dir(&outside).unwrap();
-        fs::write(outside.join("keep"), "do not delete").unwrap();
-        symlink(&outside, root.join(STATE_PATH)).unwrap();
-
-        assert!(reset_state(&root).is_err());
-        assert_eq!(
-            fs::read_to_string(outside.join("keep")).unwrap(),
-            "do not delete"
         );
     }
 }

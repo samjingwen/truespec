@@ -109,9 +109,11 @@ The browser SHALL NOT expose reviewer resolution controls or resolution badges.
 
 ### Requirement: Queue feedback without an annotation
 
-An open review SHALL show a persistent text box directly above its send controls.
-Feedback queued from this box SHALL have no document path, source range, or annotation target.
-Non-empty text still present in the box SHALL be included when the reviewer chooses **Send** or **Send and End**.
+An open review SHALL provide a collapsible general-feedback composer directly above its send controls.
+The disclosure control SHALL expose its state and remain operable with pointer, keyboard, and touch input.
+Collapsing SHALL preserve pending text and submission availability.
+Non-empty text SHALL be included by **Send** or **Send and End** even while the composer is collapsed.
+Feedback submitted from this composer SHALL have no document path, source range, or annotation target.
 
 #### Scenario: Queue general feedback
 
@@ -131,6 +133,25 @@ Non-empty text still present in the box SHALL be included when the reviewer choo
 - **THEN** the text is submitted in the same batch as any queued drafts without requiring Enter first
 - **AND** the text box clears only after submission succeeds
 - **AND** **Send** is enabled while that text is available
+
+#### Scenario: Reveal the composer disclosure control
+
+- **WHEN** a pointer hovers the composer separator, keyboard focus reaches its control, or a touch layout displays the composer
+- **THEN** a labeled collapse or expand icon button is visible
+- **AND** the control exposes the current expanded state and the content it controls
+
+#### Scenario: Collapse pending general feedback
+
+- **WHEN** the reviewer collapses a composer containing non-empty text
+- **THEN** the textarea and hint are hidden while the text remains available to **Send** and **Send and End**
+- **AND** the compact control indicates pending feedback visually and through its accessible label
+- **AND** expanding restores the same text and focuses the textarea
+
+#### Scenario: Restore the composer preference
+
+- **WHEN** the reviewer reloads after changing the composer disclosure state
+- **THEN** the browser restores that local preference
+- **AND** the remaining disclosure control can always restore the composer
 
 ### Requirement: Adapter-independent document identity
 

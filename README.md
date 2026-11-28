@@ -34,6 +34,7 @@ It reads OpenSpec artifacts in place and adds a review and agent-handoff layer a
 - **Conservative re-anchoring:** reliable unique matches relocate after edits; ambiguous targets become **Outdated** instead of attaching to the wrong text.
 - **Durable batching:** feedback is committed before the browser reports success and remains queued while no agent is connected.
 - **OpenCode integration:** `/truespec-review` pairs the current chat and worktree with one browser review.
+- **Shared local service:** one authenticated user-scoped daemon serves concurrent reviews from several initialized repositories.
 - **Agent reply mirror:** one completed harness response is appended to the browser feed for each batch.
 - **Harness-independent connector protocol:** future coding harnesses can use the same local delivery contract.
 - **Responsive workspace:** browse adapter-derived recursive document folders with remembered disclosure state, collapse either desktop panel, resize Review to a persistent width, expand it for focused feedback, and use light-dismiss drawers on smaller screens.
@@ -54,15 +55,18 @@ Markdown renderer + source map
 Annotations, drafts, batches, reviews
           |
           v
-Local SQLite inbox
-          |
-          v
+Repository-owned SQLite inbox
+           |
+           v
+ Shared loopback service
+           |
+           v
  Selected integration adapter
-          |
-          v
+           |
+           v
    truespec-review skill
-          |
-          v
+           |
+           v
  Coding agent edits Markdown
           |
           v
@@ -140,6 +144,7 @@ It defaults to `openspec` for OpenSpec and `.` for Markdown.
 Repeat `--integration` to install several integrations when more become available.
 
 Initialization writes `truespec/config/project.json`, preserves `truespec/.state/`, and installs each selected integration for the current user.
+It also starts or reuses the shared TrueSpec service and registers the repository's stable local workspace identity.
 OpenSpec is not a runtime dependency.
 TrueSpec discovers and reads its files directly.
 
@@ -222,7 +227,8 @@ In an OpenCode V2 chat located at the initialized repository root:
 ```
 
 The command takes no arguments.
-It reads `truespec/config/project.json` and opens or resumes one review paired with that exact OpenCode chat and worktree.
+It reads `truespec/config/project.json`, ensures the shared service is healthy, and opens or resumes one workspace-scoped review paired with that exact OpenCode chat and worktree.
+Several initialized repositories can keep independent reviews open through the same service.
 
 The iterative loop is:
 
@@ -260,7 +266,7 @@ Initializes the current repository and installs coding integrations.
 
 ```text
 truespec init [--source <ID>] [--source-path <PATH>]
-              [--integration <ID>]... [--all] [--force]
+              [--integration <ID>]... [--all] [--force] [--reset-state]
 ```
 
 | Option | Meaning |
@@ -270,6 +276,7 @@ truespec init [--source <ID>] [--source-path <PATH>]
 | `--integration <ID>` | Install one coding integration. Repeat to select several. |
 | `--all` | Install every registered integration. |
 | `--force` | Replace differing generated files for selected integrations. |
+| `--reset-state` | Permanently discard repository-local review state and create a fresh workspace identity. |
 
 With no integration flags in an interactive terminal, initialization presents a multi-select.
 Non-interactive initialization requires `--integration` or `--all`.
@@ -278,11 +285,54 @@ Run `truespec --help` for the authoritative public command surface.
 Connector transport and viewer operations are hidden implementation details.
 Their accepted behavior is defined by the [connector protocol specification](openspec/specs/connector-protocol/spec.md).
 
+### `truespec up`
+
+Starts or reuses the user-scoped background service and waits for authenticated readiness.
+It can run outside a repository.
+
+```text
+truespec up [--json]
+```
+
+### `truespec status`
+
+Reports service state, version, loopback endpoint, process identity, registered-project count, and the open-review count when all repository state is loaded.
+Otherwise human output says the review count is unknown and JSON returns `"open_reviews": null`.
+
+```text
+truespec status [--json]
+```
+
+### `truespec down`
+
+Requests checked graceful shutdown of the matching authenticated service.
+It is safe to repeat when the service is already stopped.
+
+```text
+truespec down [--json]
+```
+
 ### Upgrade from the pre-initialization MVP
 
 Run `truespec init` once from each repository root after upgrading.
-The existing SQLite database and review history remain in place.
-The first selected integration adopts outstanding connector-free batches without changing their snapshots or completed items.
+Existing initialized repositories must refresh the OpenCode integration after this shared-service protocol change:
+
+```sh
+truespec init --integration opencode --force
+```
+
+Review databases from older schema versions are not migrated automatically.
+Normal initialization refuses an unsupported database without modifying it.
+To intentionally discard drafts, review history, batches, replies, and connector bindings, run:
+
+```sh
+truespec init --integration opencode --force --reset-state
+```
+
+`--reset-state` removes only a validated repository-local `truespec/.state/` directory.
+It preserves source Markdown and `truespec/config/project.json`, then creates a fresh database and workspace ID.
+The shared local service drains and restarts around deletion, briefly disconnecting other open local reviews without changing their repository state.
+For a supported current database, the first selected integration adopts outstanding connector-free batches without changing their snapshots or completed items.
 The former public viewer, setup, manual inbox, reply, and relink commands are no longer available.
 
 ## Storage and state
@@ -304,22 +354,42 @@ truespec/.state/review.sqlite3
 
 Keep `truespec/.state/` out of version control.
 The database stores document identities, anchors, drafts, immutable batch snapshots, leases, connector pairings, delivery receipts, and reviewer resolution state.
+It also stores one random workspace ID for that physical checkout and its local state.
+A fresh clone without copied state receives a different workspace ID.
 
 Markdown content is never copied into a TrueSpec-owned documentation tree.
 Submitted batch snapshots preserve exactly what the agent received even when the source changes later.
 
+User-scoped service files use the platform's XDG directories, with home-directory fallbacks:
+
+```text
+$XDG_CONFIG_HOME/truespec/service.json
+$XDG_STATE_HOME/truespec/service.json
+$XDG_STATE_HOME/truespec/service.log
+$XDG_DATA_HOME/truespec/registry.sqlite3
+```
+
+The private configuration contains the local control credential and preferred port.
+The runtime registration contains process and service discovery identity.
+The global registry contains only workspace ID, canonical root, configuration fingerprint, and availability metadata.
+Documents, comments, anchors, reviews, batches, receipts, replies, and source snapshots remain in each repository's `truespec/.state/review.sqlite3`.
+Deleting the recoverable global registry does not delete review history; reinitializing or reattaching a repository rebuilds its route from repository-owned identity.
+
 ## Security and privacy
 
 - The server binds to IPv4 loopback by default.
+- Private lifecycle, registration, and connector control routes require a random owner-only bearer credential.
+- Service configuration, runtime registration, routing metadata, and bounded logs use owner-only directories and files.
 - Mutating HTTP requests require the expected same-origin browser origin.
+- Browser routes use opaque workspace and review identities and never accept a filesystem path as routing authority.
 - Document routes expose only discovered Markdown documents.
 - `truespec/.state/` and `truespec/config/` are excluded from Markdown discovery.
 - Symlinks cannot escape a selected document tree.
 - Raw Markdown HTML and scripts do not execute.
 - External images are not loaded; image alt text remains readable.
 - Safe `http`, `https`, and `mailto` links are allowed.
-- State reset refuses symlinked state directories.
 - The browser and core contain no model credentials or model runtime.
+- Global logs omit source text, review bodies, connector destinations, control credentials, project paths, and complete review URLs.
 
 ## Architecture
 
@@ -335,7 +405,9 @@ TrueSpec is one Rust binary with ordinary internal boundaries:
 | `anchor` | Line, paragraph, list, section, selection, and general-feedback identity and relocation. |
 | `review` | SQLite schema, document identities, drafts, sessions, immutable batch snapshots, and resolution. |
 | `inbox` | Connector leasing, receipts, retries, and delivery envelopes. |
-| `web` | Loopback HTTP API and embedded frontend assets. |
+| `service` | XDG paths, private configuration, runtime registration, authenticated lifecycle client, detached ownership, and bounded logs. |
+| `service_registry` | Minimal global workspace routing metadata and lazy validated project contexts. |
+| `web` | Shared loopback browser and private control APIs plus embedded frontend assets. |
 | `skills/truespec-review` | Portable instructions for handling connector-delivered review feedback. |
 
 The browser assets in `web/` are embedded with `include_str!`.
@@ -352,6 +424,8 @@ The MVP intentionally does not provide:
 - Browser-based source editing.
 - Hosted accounts or cloud synchronization.
 - Multi-user collaboration.
+- Public, LAN, tunnel, or remote ingress.
+- Operating-system service installation such as `launchd`.
 - Automatic launching of arbitrary coding agents.
 - A dynamic connector marketplace.
 - Exactly-once guarantees for edits performed outside TrueSpec.
@@ -382,7 +456,7 @@ node tests/browser.mjs
 ```
 
 The browser test requires Node.js and `chrome-devtools-axi`.
-It covers desktop and mobile layouts, annotation targets, unified review state, batching, restart persistence, delivery, drawers, and agent handoff.
+It covers desktop and mobile layouts, annotation targets, unified review state, batching, shared-service restart persistence, two-repository isolation, delivery, drawers, and agent handoff.
 
 Run the isolated OpenCode integration:
 
@@ -391,7 +465,7 @@ node tests/opencode.mjs
 ```
 
 That test starts an isolated OpenCode V2 server and deterministic local model fixture.
-It verifies two review rounds in one real OpenCode chat and confirms that Markdown updates appear at the original TrueSpec URL.
+It verifies concurrent chats from two repositories, isolated deliveries and replies, daemon recovery, stable message identities, and Markdown updates at each workspace-scoped TrueSpec URL.
 
 Before delivery, review the complete base-to-head diff and run the installed Hardlook workflow for implementation changes.
 Push the feature branch, open a GitHub pull request, and merge only after every conversation is resolved and both required hosted checks pass:
