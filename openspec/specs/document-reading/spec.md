@@ -7,7 +7,8 @@ Let reviewers browse the Markdown their project already uses, without copying do
 
 ### Requirement: Initialized reader startup
 
-An installed integration SHALL obtain a workspace-scoped loopback reader URL from the shared service using the initialized project's versioned source configuration.
+An installed integration SHALL obtain a workspace-scoped reader URL from the shared service using the initialized project's versioned source configuration.
+The URL SHALL use loopback by default and the configured private tailnet HTTPS origin while tailnet mode is active.
 The shared reader SHALL NOT require Node.js, OpenSpec, or the selected coding harness after the workspace context is attached.
 
 #### Scenario: Open an initialized OpenSpec review
@@ -25,6 +26,17 @@ The shared reader SHALL NOT require Node.js, OpenSpec, or the selected coding ha
 - **WHEN** integrations in two initialized repositories open reviews concurrently
 - **THEN** one listener serves separate workspace-scoped catalogs and review boards
 - **AND** navigation, source refresh, browser history, and old tabs remain bound to their original workspace
+
+#### Scenario: Open a review through the tailnet origin
+
+- **WHEN** tailnet mode is active and an initialized integration opens a review
+- **THEN** the reported browser URL uses the verified private HTTPS tailnet origin and the same opaque workspace and review identity
+- **AND** durable document links, refresh, history, and direct navigation remain on that workspace-scoped tailnet path
+
+#### Scenario: Keep a local review available in tailnet mode
+
+- **WHEN** tailnet mode is active and the loopback URL is opened on the host machine
+- **THEN** the local browser can use the same workspace and review without creating another session
 
 #### Scenario: Invoke TrueSpec before initialization
 

@@ -35,6 +35,7 @@ It reads OpenSpec artifacts in place and adds a review and agent-handoff layer a
 - **Durable batching:** feedback is committed before the browser reports success and remains queued while no agent is connected.
 - **OpenCode integration:** `/truespec-review` pairs the current chat and worktree with one browser review.
 - **Shared local service:** one authenticated user-scoped daemon serves concurrent reviews from several initialized repositories.
+- **Private tailnet access:** optionally open the same review from another Tailscale device while the core service, source files, review state, and coding agent remain on the host.
 - **Agent reply mirror:** one completed harness response is appended to the browser feed for each batch.
 - **Harness-independent connector protocol:** future coding harnesses can use the same local delivery contract.
 - **Responsive workspace:** browse adapter-derived recursive document folders with remembered disclosure state, collapse either desktop panel, resize Review to a persistent width, expand it for focused feedback, and use light-dismiss drawers on smaller screens.
@@ -109,6 +110,7 @@ truespec --version
 ```
 
 The installed binary does not require Node.js, OpenSpec, Lavish, or a separate frontend build.
+Tailscale is optional and is used only when private tailnet access is requested.
 
 ## Initialize a repository
 
@@ -258,6 +260,53 @@ truespec init --integration opencode --force
 Use `--force` only after confirming that you intend to replace a differing generated plugin or skill.
 TrueSpec preflights the complete initialization plan before writing project or integration files.
 
+## Review from another tailnet device
+
+TrueSpec can use [Tailscale Serve](https://tailscale.com/docs/features/tailscale-serve) to make browser review routes available to other devices on the same tailnet.
+The TrueSpec service still listens only on `127.0.0.1`.
+Tailscale terminates private HTTPS and proxies browser traffic to that loopback service.
+
+Before starting:
+
+1. Install Tailscale and sign in on the TrueSpec host and the reviewing device.
+2. Ensure the tailnet access policy allows the reviewer to reach the host on the selected HTTPS port.
+3. Enable HTTPS certificates for the tailnet and ensure the host has a Tailscale DNS name.
+
+Start TrueSpec with the dedicated default HTTPS port:
+
+```sh
+truespec up --tailnet
+```
+
+If port `8443` is already used by another Serve configuration, select another dedicated port:
+
+```sh
+truespec up --tailnet --tailnet-port 9443
+```
+
+TrueSpec refuses to replace or adopt an existing listener.
+Do not modify TrueSpec's selected Serve port concurrently with `truespec up` or `truespec down`.
+If Tailscale times out while provisioning HTTPS, enable tailnet HTTPS certificates in the Tailscale admin console and retry.
+On success, status reports the private `https://<device>.<tailnet>.ts.net:<port>` origin.
+Run `/truespec-review` normally and the integration opens the tailnet URL.
+Existing loopback review URLs continue to work on the host and refer to the same review.
+
+Tailnet mode remains enabled across automatic service recovery.
+Running `truespec down` removes only the exact Serve listener recorded by TrueSpec and disables tailnet mode.
+The next ordinary `truespec up` starts in local-only mode.
+If the recorded listener is already absent, `down` treats external cleanup as complete and clears the stale ownership record.
+If the listener no longer matches the recorded target, `down` leaves it unchanged and prints an exact-port inspection and recovery command.
+The local TrueSpec service still stops when Serve cleanup cannot be verified.
+
+Remote browser requests must arrive through the exact configured HTTPS origin and include a Tailscale user identity.
+Traffic without a user identity, including traffic from tagged devices that does not carry user identity headers, is rejected.
+Tailscale access-control rules remain the network authorization boundary.
+Private `/__control/*` routes are always rejected through the tailnet origin.
+The browser never receives the local bearer credential.
+
+Source Markdown, repository review databases, connector delivery, coding-agent execution, and provider credentials remain on the TrueSpec host.
+TrueSpec does not store Tailscale user identities.
+
 ## Command reference
 
 ### `truespec init`
@@ -291,12 +340,16 @@ Starts or reuses the user-scoped background service and waits for authenticated 
 It can run outside a repository.
 
 ```text
-truespec up [--json]
+truespec up [--tailnet] [--tailnet-port <PORT>] [--json]
 ```
+
+`--tailnet` configures one private Tailscale Serve HTTPS listener on port `8443`.
+`--tailnet-port` selects another dedicated HTTPS port and requires `--tailnet`.
 
 ### `truespec status`
 
-Reports service state, version, loopback endpoint, process identity, registered-project count, and the open-review count when all repository state is loaded.
+Reports service state, version, loopback endpoint, process identity, registered-project count, tailnet state, and the open-review count when all repository state is loaded.
+Tailnet status includes only the configured HTTPS port, private origin, and whether the owned Serve listener still matches.
 Otherwise human output says the review count is unknown and JSON returns `"open_reviews": null`.
 
 ```text
@@ -306,6 +359,7 @@ truespec status [--json]
 ### `truespec down`
 
 Requests checked graceful shutdown of the matching authenticated service.
+When tailnet mode is enabled, it removes only the exact TrueSpec-owned Serve listener and then disables the persisted mode.
 It is safe to repeat when the service is already stopped.
 
 ```text
@@ -369,7 +423,7 @@ $XDG_STATE_HOME/truespec/service.log
 $XDG_DATA_HOME/truespec/registry.sqlite3
 ```
 
-The private configuration contains the local control credential and preferred port.
+The private configuration contains the local control credential, preferred local port, and optional exact tailnet origin, HTTPS port, and loopback proxy target.
 The runtime registration contains process and service discovery identity.
 The global registry contains only workspace ID, canonical root, configuration fingerprint, and availability metadata.
 Documents, comments, anchors, reviews, batches, receipts, replies, and source snapshots remain in each repository's `truespec/.state/review.sqlite3`.
@@ -377,7 +431,11 @@ Deleting the recoverable global registry does not delete review history; reiniti
 
 ## Security and privacy
 
-- The server binds to IPv4 loopback by default.
+- The core server always binds to IPv4 loopback.
+- Optional tailnet access uses Tailscale Serve for private HTTPS while preserving the loopback listener.
+- Tailnet browser traffic requires the exact configured Host and Origin plus a non-empty Tailscale user identity.
+- Tailnet access remains subject to the tailnet access policy.
+- Private `/__control/*` routes remain loopback-only and are never exposed through Serve.
 - Private lifecycle, registration, and connector control routes require a random owner-only bearer credential.
 - Service configuration, runtime registration, routing metadata, and bounded logs use owner-only directories and files.
 - Mutating HTTP requests require the expected same-origin browser origin.
@@ -389,7 +447,7 @@ Deleting the recoverable global registry does not delete review history; reiniti
 - External images are not loaded; image alt text remains readable.
 - Safe `http`, `https`, and `mailto` links are allowed.
 - The browser and core contain no model credentials or model runtime.
-- Global logs omit source text, review bodies, connector destinations, control credentials, project paths, and complete review URLs.
+- Global logs omit source text, review bodies, connector destinations, control credentials, project paths, Tailscale identities, private DNS names, and complete review URLs.
 
 ## Architecture
 
@@ -406,8 +464,9 @@ TrueSpec is one Rust binary with ordinary internal boundaries:
 | `review` | SQLite schema, document identities, drafts, sessions, immutable batch snapshots, and resolution. |
 | `inbox` | Connector leasing, receipts, retries, and delivery envelopes. |
 | `service` | XDG paths, private configuration, runtime registration, authenticated lifecycle client, detached ownership, and bounded logs. |
+| `tailnet` | Bounded Tailscale discovery, private DNS validation, exact Serve listener ownership, and remote readiness checks. |
 | `service_registry` | Minimal global workspace routing metadata and lazy validated project contexts. |
-| `web` | Shared loopback browser and private control APIs plus embedded frontend assets. |
+| `web` | Shared browser routes, exact local or tailnet request trust, loopback-only control APIs, and embedded frontend assets. |
 | `skills/truespec-review` | Portable instructions for handling connector-delivered review feedback. |
 
 The browser assets in `web/` are embedded with `include_str!`.
@@ -424,7 +483,7 @@ The MVP intentionally does not provide:
 - Browser-based source editing.
 - Hosted accounts or cloud synchronization.
 - Multi-user collaboration.
-- Public, LAN, tunnel, or remote ingress.
+- Hosted synchronization, arbitrary tunnel ingress, or LAN exposure outside the configured tailnet route.
 - Operating-system service installation such as `launchd`.
 - Automatic launching of arbitrary coding agents.
 - A dynamic connector marketplace.

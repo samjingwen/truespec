@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFile, spawn } from "node:child_process";
 import { once } from "node:events";
-import { access, mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
+import { access, chmod, mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -131,14 +131,54 @@ try {
 
   const home = join(root, "home");
   await mkdir(home);
+  const portProbe = createServer();
+  portProbe.listen(0, "127.0.0.1");
+  await once(portProbe, "listening");
+  const servicePort = portProbe.address().port;
+  portProbe.close();
+  await once(portProbe, "close");
+  const tailscaleState = join(root, "tailscale-state.json");
+  const fakeTailscale = join(root, "tailscale");
+  await writeFile(fakeTailscale, `#!/bin/sh
+set -eu
+if [ "$1 $2" = "status --json" ]; then
+  printf '%s' '{"BackendState":"Running","Self":{"Online":true,"DNSName":"device.example.ts.net."}}'
+elif [ "$1 $2 $3" = "serve status --json" ]; then
+  if [ -f "${tailscaleState}" ]; then
+    IFS= read -r value < "${tailscaleState}" || true
+    printf '%s' "$value"
+  else
+    printf '{}'
+  fi
+elif [ "$1 $2" = "serve --bg" ]; then
+  port="\${4#--https=}"
+  target="$5"
+  printf '{"TCP":{"%s":{"HTTPS":true}},"Web":{"device.example.ts.net:%s":{"Handlers":{"/":{"Proxy":"%s"}}}}}' "$port" "$port" "$target" > "${tailscaleState}"
+elif [ "$1" = "serve" ] && [ "$3" = "off" ]; then
+  printf '{}' > "${tailscaleState}"
+else
+  exit 9
+fi
+`);
+  await chmod(fakeTailscale, 0o700);
   const env = {
     PATH: process.env.PATH, HOME: home, USERPROFILE: home,
     XDG_CONFIG_HOME: join(root, "config"), XDG_DATA_HOME: join(root, "data"),
     XDG_CACHE_HOME: join(root, "cache"), XDG_STATE_HOME: join(root, "state"),
     OPENCODE_DB: join(root, "opencode.sqlite"), OPENCODE_DISABLE_FREE_MODELS: "1",
-    TRUESPEC_BIN: binary, TRUESPEC_NO_OPEN: "1",
+    TRUESPEC_BIN: binary, TRUESPEC_NO_OPEN: "1", TRUESPEC_SERVICE_PORT: String(servicePort),
+    TRUESPEC_TAILSCALE_BIN: fakeTailscale,
   };
   serviceEnv = env;
+  const tailnetStarted = await new Promise(resolve => {
+    execFile(binary, ["up", "--tailnet", "--tailnet-port", "18443", "--json"], {
+      env, cwd: workspace, encoding: "utf8", timeout: 25_000,
+    }, (error, stdout, stderr) => resolve({ ok: !error, text: stdout.trim() || stderr.trim() }));
+  });
+  assert.ok(tailnetStarted.ok, tailnetStarted.text);
+  const initialService = JSON.parse(tailnetStarted.text);
+  assert.equal(initialService.tailnet.enabled, true);
+  assert.equal(initialService.tailnet.verified, true);
   const initialized = await new Promise(resolve => {
     execFile(binary, ["init", "--integration", "opencode"], {
       env, cwd: workspace, encoding: "utf8", timeout: 25_000,
@@ -177,18 +217,21 @@ try {
     const inbox = await openCode(`${path}/inbox`);
     const messages = await openCode(`${path}/message?type=synthetic`);
     return [...new Set(JSON.stringify([inbox, messages]).match(
-      /http:\/\/127\.0\.0\.1:\d+\/w\/[a-z0-9-]+\/\?review=[a-z0-9-]+/g,
+      /(?:http:\/\/127\.0\.0\.1:\d+|https:\/\/device\.example\.ts\.net:18443)\/w\/[a-z0-9-]+\/\?review=[a-z0-9-]+/g,
     ) || [])];
   };
   const getNotes = () => notesFor(chat);
-  let viewer = await until("TrueSpec viewer URL published to the paired chat", async () => (await getNotes())[0]);
-  const review = new URL(viewer).searchParams.get("review");
+  const selectedViewer = await until("TrueSpec viewer URL published to the paired chat", async () => (await getNotes())[0]);
+  assert.match(selectedViewer, /^https:\/\/device\.example\.ts\.net:18443\//);
+  let selected = new URL(selectedViewer);
+  let viewer = new URL(`${selected.pathname}${selected.search}`, initialService.endpoint).href;
+  const review = selected.searchParams.get("review");
   assert.ok(review);
   const competing = await invoke(`/api/session/${other.id}`);
   assert.ok(!competing.ok && /different chat/.test(competing.text), `Pairing a different chat: ${competing.text}`);
   const reopened = await invoke(chat);
   assert.ok(reopened.ok, reopened.text);
-  assert.deepEqual(await getNotes(), [viewer]);
+  assert.deepEqual(await getNotes(), [selectedViewer]);
 
   const route = `/api/reviews/${review}`;
   const board = () => api(viewer, route);
@@ -293,10 +336,13 @@ try {
   const markdownChat = `/api/session/${markdownSession.id}`;
   const markdownOpened = await invoke(markdownChat);
   assert.ok(markdownOpened.ok, `${markdownOpened.text}\n${log}`);
-  const markdownViewer = await until(
+  const selectedMarkdownViewer = await until(
     "Markdown TrueSpec viewer URL",
     async () => (await notesFor(markdownChat))[0],
   );
+  assert.match(selectedMarkdownViewer, /^https:\/\/device\.example\.ts\.net:18443\//);
+  selected = new URL(selectedMarkdownViewer);
+  const markdownViewer = new URL(`${selected.pathname}${selected.search}`, initialService.endpoint).href;
   assert.notEqual(new URL(markdownViewer).pathname, new URL(viewer).pathname);
   assert.equal((await board()).review.ended, false);
   const markdownDocuments = await api(markdownViewer, "/api/documents");
@@ -336,6 +382,7 @@ try {
       }));
   });
   const beforeRestart = JSON.parse((await lifecycle(["status", "--json"])).text);
+  assert.equal(beforeRestart.tailnet.enabled, true);
   assert.equal((await lifecycle(["down", "--json"])).ok, true);
   const reopenedAfterRestart = await invoke(chat);
   assert.ok(reopenedAfterRestart.ok, reopenedAfterRestart.text);
@@ -345,9 +392,11 @@ try {
     const status = JSON.parse(result.text);
     return status.state === "running" && status.pid !== beforeRestart.pid ? status : undefined;
   });
-  viewer = (await getNotes()).at(-1);
   assert.equal(afterRestart.state, "running");
+  assert.equal(afterRestart.tailnet.enabled, false);
   assert.notEqual(afterRestart.pid, beforeRestart.pid);
+  const previousViewer = new URL(viewer);
+  viewer = new URL(`${previousViewer.pathname}${previousViewer.search}`, afterRestart.endpoint).href;
 
   const secondBatch = await round("Use revision two.", "Revision two.", true);
   assert.equal((await board()).comments.filter(comment => comment.delivery === "replied").length, 2);

@@ -3,7 +3,7 @@ import { execFile, spawn } from "node:child_process";
 import { realpath } from "node:fs/promises";
 import { setTimeout as delay } from "node:timers/promises";
 
-const PROTOCOL = 2;
+const PROTOCOL = 3;
 const MAX_OUTPUT = 32 * 1024 * 1024;
 const INSTALLED_BINARY = "__TRUESPEC_INSTALLED_BINARY__";
 
@@ -50,7 +50,7 @@ function pendingRecord(value: unknown): value is PendingReply {
 function protocolRecord(text: string): Record<string, unknown> {
   const value: unknown = JSON.parse(text);
   if (!record(value) || value.protocol_version !== PROTOCOL) {
-    throw new Error("The installed TrueSpec binary doesn't support connector protocol 2. Run `truespec init --integration opencode --force`.");
+    throw new Error("The installed TrueSpec binary doesn't support connector protocol 3. Run `truespec init --integration opencode --force`.");
   }
   return value;
 }
@@ -293,12 +293,35 @@ export default Plugin.define({
           const chat = await ctx.session.get({ sessionID });
           const chatDirectory = await realpath(chat.location.directory);
           const output = await run(["attach", "--kind", "opencode", "--destination", sessionID, "--label", "OpenCode"], chatDirectory);
-          const binding = { ...output, sessionID, chatDirectory };
+          const binding = {
+            connection_id: output.connection_id,
+            review_id: output.review_id,
+            workspace: output.workspace,
+            sessionID,
+            chatDirectory,
+          };
           if (!bindingRecord(binding)) throw new Error("TrueSpec reported an invalid review connection.");
-          if (typeof output.url !== "string") throw new Error("TrueSpec did not report a browser URL.");
+          if (typeof output.url !== "string" || typeof output.local_url !== "string"
+              || typeof output.workspace_id !== "string"
+              || !(output.tailnet_origin === undefined || typeof output.tailnet_origin === "string")) {
+            throw new Error("TrueSpec did not report valid browser URL metadata.");
+          }
           const url = new URL(output.url);
-          if (url.protocol !== "http:" || url.hostname !== "127.0.0.1"
-              || !/^\/w\/[a-z0-9-]+\/$/.test(url.pathname)
+          const local = new URL(output.local_url);
+          const tailnet = typeof output.tailnet_origin === "string" ? new URL(output.tailnet_origin) : undefined;
+          const expectedPath = `/w/${output.workspace_id}/`;
+          const validLocal = local.protocol === "http:" && local.hostname === "127.0.0.1"
+            && local.pathname === expectedPath && local.searchParams.size === 1
+            && local.searchParams.get("review") === binding.review_id
+            && !local.hash && !local.username && !local.password;
+          const validTailnetOrigin = !tailnet || (tailnet.protocol === "https:"
+            && tailnet.hostname.endsWith(".ts.net") && tailnet.pathname === "/"
+            && !tailnet.search && !tailnet.hash && !tailnet.username && !tailnet.password);
+          const expectedSelected = tailnet
+            ? new URL(`${local.pathname}${local.search}`, tailnet).href
+            : local.href;
+          if (!validLocal || !validTailnetOrigin || url.href !== expectedSelected
+              || url.pathname !== expectedPath
               || url.searchParams.get("review") !== binding.review_id) {
             throw new Error("TrueSpec reported an unexpected browser URL.");
           }

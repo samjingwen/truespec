@@ -61,6 +61,14 @@ struct SharedApp {
     shutdown_requested: Arc<AtomicBool>,
 }
 
+#[derive(Clone)]
+struct BrowserAccess {
+    local_host: String,
+    local_origin: String,
+    tailnet_host: Option<String>,
+    tailnet_origin: Option<String>,
+}
+
 pub async fn serve_shared(
     listener: TcpListener,
     registry: ProjectRegistry,
@@ -71,6 +79,7 @@ pub async fn serve_shared(
 ) -> Result<()> {
     let address = listener.local_addr()?.to_string();
     let origin = format!("http://{address}");
+    let browser_access = BrowserAccess::new(address.clone(), origin, config.tailnet())?;
     let shutdown = Arc::new(Notify::new());
     let shutdown_requested = Arc::new(AtomicBool::new(false));
     let state = SharedApp {
@@ -156,8 +165,8 @@ pub async fn serve_shared(
         .route("/__control/shutdown", post(control_shutdown))
         .layer(DefaultBodyLimit::max(BROWSER_BODY_LIMIT))
         .layer(middleware::from_fn_with_state(
-            (address, origin),
-            local_only,
+            browser_access,
+            trusted_browser,
         ))
         .with_state(state);
     axum::serve(listener, app)
@@ -214,30 +223,50 @@ async fn shutdown_signal() {
     let _ = tokio::signal::ctrl_c().await;
 }
 
-async fn local_only(
-    State((host, origin)): State<(String, String)>,
+impl BrowserAccess {
+    fn new(
+        local_host: String,
+        local_origin: String,
+        tailnet: &crate::service::TailnetConfig,
+    ) -> Result<Self> {
+        let (tailnet_host, tailnet_origin) = if tailnet.enabled {
+            let origin = tailnet
+                .origin
+                .as_deref()
+                .ok_or_else(|| anyhow::anyhow!("Tailnet browser origin is missing"))?;
+            let url = reqwest::Url::parse(origin)?;
+            let host = url
+                .host_str()
+                .ok_or_else(|| anyhow::anyhow!("Tailnet browser origin has no host"))?;
+            let host = match url.port() {
+                Some(port) => format!("{host}:{port}"),
+                None => host.to_owned(),
+            };
+            (Some(host), Some(origin.to_owned()))
+        } else {
+            (None, None)
+        };
+        Ok(Self {
+            local_host,
+            local_origin,
+            tailnet_host,
+            tailnet_origin,
+        })
+    }
+}
+
+async fn trusted_browser(
+    State(access): State<BrowserAccess>,
     request: Request,
     next: Next,
 ) -> Response {
-    let host_matches = request
-        .headers()
-        .get(header::HOST)
-        .and_then(|v| v.to_str().ok())
-        == Some(host.as_str());
-    let safe = matches!(*request.method(), Method::GET | Method::HEAD);
-    let private_control = request.uri().path().starts_with("/__control/")
-        && request.headers().contains_key(header::AUTHORIZATION);
-    let origin_matches = request
-        .headers()
-        .get(header::ORIGIN)
-        .and_then(|v| v.to_str().ok())
-        == Some(origin.as_str());
-    if !host_matches || (!safe && !origin_matches && !private_control) {
-        return (
-            StatusCode::FORBIDDEN,
-            "Use the TrueSpec loopback URL from the terminal.",
-        )
-            .into_response();
+    if !browser_request_allowed(
+        &access,
+        request.method(),
+        request.uri().path(),
+        request.headers(),
+    ) {
+        return (StatusCode::FORBIDDEN, "Use a trusted TrueSpec browser URL.").into_response();
     }
     let mut response = next.run(request).await;
     let headers = response.headers_mut();
@@ -256,6 +285,53 @@ async fn local_only(
         .entry(header::CACHE_CONTROL)
         .or_insert(HeaderValue::from_static("no-store"));
     response
+}
+
+fn browser_request_allowed(
+    access: &BrowserAccess,
+    method: &Method,
+    path: &str,
+    headers: &HeaderMap,
+) -> bool {
+    let host = headers
+        .get(header::HOST)
+        .and_then(|value| value.to_str().ok());
+    let origin = headers
+        .get(header::ORIGIN)
+        .and_then(|value| value.to_str().ok());
+    let safe = matches!(*method, Method::GET | Method::HEAD);
+    let control = path.starts_with("/__control/");
+    let identified = headers
+        .get("tailscale-user-login")
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| !value.trim().is_empty());
+    let forwarded_host = headers
+        .get("x-forwarded-host")
+        .and_then(|value| value.to_str().ok());
+    let forwarded_for = headers
+        .get("x-forwarded-for")
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| !value.trim().is_empty());
+    let proxied = identified || forwarded_host.is_some() || forwarded_for;
+    if proxied {
+        let (Some(tailnet_host), Some(tailnet_origin)) = (
+            access.tailnet_host.as_deref(),
+            access.tailnet_origin.as_deref(),
+        ) else {
+            return false;
+        };
+        return !headers.contains_key("tailscale-funnel-request")
+            && !control
+            && identified
+            && forwarded_for
+            && host == Some(tailnet_host)
+            && forwarded_host == Some(tailnet_host)
+            && (safe || origin == Some(tailnet_origin));
+    }
+    host == Some(access.local_host.as_str())
+        && (safe
+            || origin == Some(access.local_origin.as_str())
+            || (control && headers.contains_key(header::AUTHORIZATION)))
 }
 
 fn asset(content_type: &'static str, text: &'static str) -> impl IntoResponse {
@@ -411,7 +487,7 @@ fn control_protocol(protocol: u8) -> Result<(), ApiError> {
         Ok(())
     } else {
         Err(ApiError(invalid(format!(
-            "Unsupported connector protocol {protocol}; expected {PROTOCOL_VERSION}."
+            "Unsupported connector protocol {protocol}; expected {PROTOCOL_VERSION}. Refresh the installed integration. For OpenCode, run `truespec init --integration opencode --force`."
         ))))
     }
 }
@@ -448,16 +524,22 @@ async fn control_connector_attach(
         .map_err(|_| ApiError(anyhow::anyhow!("Service registration is unavailable")))?
         .url
         .clone();
+    let review_path = format!("w/{}/?review={}", project.id, binding.review_id);
+    let local_url = format!("{service_url}{review_path}");
+    let tailnet_origin = app.config.tailnet().origin.clone();
+    let url = tailnet_origin.as_ref().map_or_else(
+        || local_url.clone(),
+        |origin| format!("{origin}/{review_path}"),
+    );
     Ok(Json(AttachResponse {
         protocol_version: PROTOCOL_VERSION,
         workspace_id: project.id.clone(),
         workspace: project.root.clone(),
         connection_id: binding.connection_id,
         review_id: binding.review_id.clone(),
-        url: format!(
-            "{}w/{}/?review={}",
-            service_url, project.id, binding.review_id
-        ),
+        url,
+        local_url,
+        tailnet_origin,
     }))
 }
 
@@ -1114,6 +1196,123 @@ async fn new_session(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn access() -> BrowserAccess {
+        BrowserAccess {
+            local_host: "127.0.0.1:47371".into(),
+            local_origin: "http://127.0.0.1:47371".into(),
+            tailnet_host: Some("device.example.ts.net:8443".into()),
+            tailnet_origin: Some("https://device.example.ts.net:8443".into()),
+        }
+    }
+
+    fn headers(host: &str, origin: Option<&str>, identity: Option<&str>) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::HOST, HeaderValue::from_str(host).unwrap());
+        if let Some(origin) = origin {
+            headers.insert(header::ORIGIN, HeaderValue::from_str(origin).unwrap());
+        }
+        if let Some(identity) = identity {
+            headers.insert(
+                "tailscale-user-login",
+                HeaderValue::from_str(identity).unwrap(),
+            );
+            headers.insert("x-forwarded-for", HeaderValue::from_static("100.64.0.1"));
+            headers.insert("x-forwarded-host", HeaderValue::from_str(host).unwrap());
+        }
+        headers
+    }
+
+    #[test]
+    fn browser_trust_accepts_exact_local_and_identified_tailnet_origins() {
+        let access = access();
+        assert!(browser_request_allowed(
+            &access,
+            &Method::GET,
+            "/w/workspace/",
+            &headers("127.0.0.1:47371", None, None)
+        ));
+        assert!(browser_request_allowed(
+            &access,
+            &Method::POST,
+            "/api/workspaces/workspace/reviews/review/comments",
+            &headers(
+                "device.example.ts.net:8443",
+                Some("https://device.example.ts.net:8443"),
+                Some("reviewer@example.com")
+            )
+        ));
+    }
+
+    #[test]
+    fn browser_trust_rejects_missing_identity_wrong_origin_and_remote_controls() {
+        let access = access();
+        assert!(!browser_request_allowed(
+            &access,
+            &Method::GET,
+            "/w/workspace/",
+            &headers("device.example.ts.net:8443", None, None)
+        ));
+        assert!(!browser_request_allowed(
+            &access,
+            &Method::GET,
+            "/w/workspace/",
+            &headers("127.0.0.1:47371", None, Some("reviewer@example.com"))
+        ));
+        assert!(!browser_request_allowed(
+            &access,
+            &Method::POST,
+            "/api/workspaces/workspace/reviews/review/comments",
+            &headers(
+                "device.example.ts.net:8443",
+                Some("https://other.example.ts.net:8443"),
+                Some("reviewer@example.com")
+            )
+        ));
+        let mut remote_control = headers(
+            "device.example.ts.net:8443",
+            Some("https://device.example.ts.net:8443"),
+            Some("reviewer@example.com"),
+        );
+        remote_control.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_static("Bearer private"),
+        );
+        assert!(!browser_request_allowed(
+            &access,
+            &Method::GET,
+            "/__control/health",
+            &remote_control
+        ));
+        assert!(!browser_request_allowed(
+            &access,
+            &Method::POST,
+            "/__control/connectors/attach",
+            &remote_control
+        ));
+    }
+
+    #[test]
+    fn local_only_browser_trust_rejects_proxy_markers_without_an_authority() {
+        let access = BrowserAccess {
+            local_host: "127.0.0.1:47371".into(),
+            local_origin: "http://127.0.0.1:47371".into(),
+            tailnet_host: None,
+            tailnet_origin: None,
+        };
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "tailscale-user-login",
+            HeaderValue::from_static("reviewer@example.com"),
+        );
+        headers.insert("x-forwarded-for", HeaderValue::from_static("100.64.0.1"));
+        assert!(!browser_request_allowed(
+            &access,
+            &Method::GET,
+            "/",
+            &headers
+        ));
+    }
 
     #[test]
     fn duplicate_workspace_identity_is_an_actionable_conflict() {
