@@ -765,10 +765,11 @@ fn init_installs_and_protects_the_complete_opencode_bundle() {
     assert!(generated_plugin.contains("output.url"));
     assert!(generated_plugin.contains("connection_id: output.connection_id"));
     assert!(!generated_plugin.contains("{ ...output, sessionID"));
-    assert!(generated_plugin.contains("const reviewText = reviewURLs.join(\"\\n\")"));
-    assert!(generated_plugin.contains("text: reviewText"));
-    assert!(generated_plugin.contains("description: reviewText"));
-    assert!(!generated_plugin.contains("TrueSpec review opened"));
+    assert!(generated_plugin.contains("`[Local](${local.href})`"));
+    assert!(generated_plugin.contains("`[Tailnet](${url.href}) · [Local](${local.href})`"));
+    assert!(generated_plugin.contains("ctx.session.prompt"));
+    assert!(generated_plugin.contains("resume: false"));
+    assert!(!generated_plugin.contains("ctx.session.synthetic"));
     assert!(!generated_plugin.contains("TrueSpec review:"));
     assert!(!generated_plugin.contains("openBrowser"));
     assert!(!generated_plugin.contains("xdg-open"));

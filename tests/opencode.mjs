@@ -17,6 +17,7 @@ const provider = createServer();
 let server;
 let log = "";
 let providerError;
+let providerRequests = 0;
 let serviceEnv;
 
 async function until(description, check, timeout = 20_000) {
@@ -51,6 +52,7 @@ function fakeModel(request, response) {
       response.writeHead(404).end();
       return;
     }
+    providerRequests += 1;
     const chunks = [];
     for await (const chunk of request) chunks.push(chunk);
     const payload = JSON.parse(Buffer.concat(chunks).toString());
@@ -211,11 +213,13 @@ fi
   const chat = `/api/session/${session.id}`;
   const command = { name: "truespec-review", text: "" };
   const invoke = path => cliRequest("POST", `${path}/command`, command);
+  const initialProviderRequests = providerRequests;
+  const initialAssistantMessages = JSON.stringify(await openCode(`${chat}/message?type=assistant`));
   const opened = await invoke(chat);
   assert.ok(opened.ok, `${opened.text}\n${log}`);
   const notesFor = async path => {
     const inbox = await openCode(`${path}/inbox`);
-    const messages = await openCode(`${path}/message?type=synthetic`);
+    const messages = await openCode(`${path}/message?type=user`);
     return [...new Set(JSON.stringify([inbox, messages]).match(
       /(?:http:\/\/127\.0\.0\.1:\d+|https:\/\/device\.example\.ts\.net:18443)\/w\/[a-z0-9-]+\/\?review=[a-z0-9-]+/g,
     ) || [])];
@@ -226,22 +230,12 @@ fi
     else if (value && typeof value === "object") Object.values(value).forEach(item => stringValues(item, values));
     return values;
   };
-  const descriptionValues = (value, values = []) => {
-    if (Array.isArray(value)) value.forEach(item => descriptionValues(item, values));
-    else if (value && typeof value === "object") {
-      if (typeof value.description === "string") values.push(value.description);
-      Object.values(value).forEach(item => descriptionValues(item, values));
-    }
-    return values;
-  };
-  const syntheticPayloadFor = async path => [
+  const reviewPayloadFor = async path => [
     await openCode(`${path}/inbox`),
-    await openCode(`${path}/message?type=synthetic`),
+    await openCode(`${path}/message?type=user`),
   ];
-  const syntheticStringsFor = async path =>
-    stringValues(await syntheticPayloadFor(path));
-  const syntheticDescriptionsFor = async path =>
-    descriptionValues(await syntheticPayloadFor(path));
+  const reviewStringsFor = async path =>
+    stringValues(await reviewPayloadFor(path));
   const addedStrings = (before, after) => {
     const remaining = new Map();
     before.forEach(value => remaining.set(value, (remaining.get(value) || 0) + 1));
@@ -257,16 +251,17 @@ fi
   assert.match(selectedViewer, /^https:\/\/device\.example\.ts\.net:18443\//);
   let selected = new URL(selectedViewer);
   let viewer = new URL(`${selected.pathname}${selected.search}`, initialService.endpoint).href;
-  const tailnetMessage = `${selectedViewer}\n${viewer}`;
-  const tailnetSynthetic = await syntheticStringsFor(chat);
-  const tailnetTextValues = tailnetSynthetic.filter(value => value.includes(selectedViewer));
-  assert.ok(tailnetTextValues.length > 0);
-  assert.ok(tailnetTextValues.every(value => value === tailnetMessage));
-  const tailnetDescriptions = (await syntheticDescriptionsFor(chat))
+  const tailnetMessage = `[Tailnet](${selectedViewer}) · [Local](${viewer})`;
+  const tailnetReviewStrings = (await reviewStringsFor(chat))
     .filter(value => value.includes(selectedViewer));
-  assert.ok(tailnetDescriptions.length > 0);
-  assert.ok(tailnetDescriptions.every(value => value === tailnetMessage));
-  assert.equal(tailnetSynthetic.some(value => value.includes("TrueSpec review:")), false);
+  assert.ok(tailnetReviewStrings.length > 0);
+  assert.ok(tailnetReviewStrings.every(value => value === tailnetMessage));
+  await delay(300);
+  assert.equal(providerRequests, initialProviderRequests);
+  assert.equal(
+    JSON.stringify(await openCode(`${chat}/message?type=assistant`)),
+    initialAssistantMessages,
+  );
   const review = selected.searchParams.get("review");
   assert.ok(review);
   const competing = await invoke(`/api/session/${other.id}`);
@@ -423,11 +418,13 @@ fi
         text: stdout.trim() || stderr.trim(),
       }));
   });
-  const syntheticBeforeLocalRestart = await syntheticStringsFor(chat);
-  const descriptionsBeforeLocalRestart = await syntheticDescriptionsFor(chat);
+  const reviewStringsBeforeLocalRestart = await reviewStringsFor(chat);
   const beforeRestart = JSON.parse((await lifecycle(["status", "--json"])).text);
   assert.equal(beforeRestart.tailnet.enabled, true);
   assert.equal((await lifecycle(["down", "--json"])).ok, true);
+  const providerRequestsBeforeLocalReview = providerRequests;
+  const assistantMessagesBeforeLocalReview =
+    JSON.stringify(await openCode(`${chat}/message?type=assistant`));
   const reopenedAfterRestart = await invoke(chat);
   assert.ok(reopenedAfterRestart.ok, reopenedAfterRestart.text);
   const afterRestart = await until("shared service recovery after restart", async () => {
@@ -441,18 +438,19 @@ fi
   assert.notEqual(afterRestart.pid, beforeRestart.pid);
   const previousViewer = new URL(viewer);
   viewer = new URL(`${previousViewer.pathname}${previousViewer.search}`, afterRestart.endpoint).href;
-  const localSynthetic = addedStrings(syntheticBeforeLocalRestart, await syntheticStringsFor(chat));
-  const localTextValues = localSynthetic.filter(value => value.includes(viewer));
-  assert.ok(localTextValues.length > 0);
-  assert.ok(localTextValues.every(value => value === viewer));
-  const localDescriptions = addedStrings(
-    descriptionsBeforeLocalRestart,
-    await syntheticDescriptionsFor(chat),
+  const localReviewStrings = addedStrings(
+    reviewStringsBeforeLocalRestart,
+    await reviewStringsFor(chat),
+  ).filter(value => value.includes(viewer));
+  const localMessage = `[Local](${viewer})`;
+  assert.ok(localReviewStrings.length > 0);
+  assert.ok(localReviewStrings.every(value => value === localMessage));
+  await delay(300);
+  assert.equal(providerRequests, providerRequestsBeforeLocalReview);
+  assert.equal(
+    JSON.stringify(await openCode(`${chat}/message?type=assistant`)),
+    assistantMessagesBeforeLocalReview,
   );
-  const visibleLocalDescriptions = localDescriptions.filter(value => value.includes(viewer));
-  assert.ok(visibleLocalDescriptions.length > 0);
-  assert.ok(visibleLocalDescriptions.every(value => value === viewer));
-  assert.equal(localSynthetic.some(value => value.includes("TrueSpec review:")), false);
 
   const secondBatch = await round("Use revision two.", "Revision two.", true);
   assert.equal((await board()).comments.filter(comment => comment.delivery === "replied").length, 2);

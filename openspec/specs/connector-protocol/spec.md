@@ -82,20 +82,26 @@ An old browser tab SHALL remain on its original workspace, review, and origin af
 
 ### Requirement: Present review URLs in the coding conversation
 
-An installed integration SHALL present the available review URLs to its paired conversation as URL lines without labels or other message text.
-Presenting review URLs SHALL NOT launch a browser automatically.
+An installed integration SHALL present the available review destinations as compact Markdown links in a normal conversation message.
+It SHALL admit that message without requesting an agent response and SHALL NOT launch a browser automatically.
 
 #### Scenario: Present a local review URL
 
 - **WHEN** an integration opens a review in local mode
-- **THEN** its conversation message contains exactly the loopback review URL
-- **AND** it contains no label or explanatory text
+- **THEN** its conversation message contains exactly `[Local](<loopback-review-url>)`
+- **AND** the label links to the canonical loopback review URL
 
 #### Scenario: Present tailnet and local review URLs
 
 - **WHEN** an integration opens a review in tailnet mode
-- **THEN** its conversation message contains the selected tailnet review URL on the first line and the loopback review URL on the second line
-- **AND** it contains no label or explanatory text
+- **THEN** its conversation message contains exactly `[Tailnet](<tailnet-review-url>) · [Local](<loopback-review-url>)`
+- **AND** each label links to its canonical review URL
+
+#### Scenario: Admit links without an agent turn
+
+- **WHEN** an integration presents review links
+- **THEN** OpenCode stores a normal user message without issuing a model request or creating an assistant response
+- **AND** the message is available to future conversation context
 
 #### Scenario: Present URLs without launching a browser
 
