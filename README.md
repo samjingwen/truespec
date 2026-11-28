@@ -365,6 +365,9 @@ TrueSpec is currently verified on macOS and Linux.
 
 ## Development
 
+Every repository edit is developed on a dedicated Worktrunk branch and worktree.
+Keep the change scoped to its active OpenSpec change, preserve unrelated work, and do not edit directly on `master`.
+
 Run the ordinary quality gate:
 
 ```sh
@@ -392,6 +395,18 @@ node tests/opencode.mjs
 
 That test starts an isolated OpenCode V2 server and deterministic local model fixture.
 It verifies two review rounds in one real OpenCode chat and confirms that Markdown updates appear at the original TrueSpec URL.
+
+Before delivery, review the complete base-to-head diff and run the installed Hardlook workflow for implementation changes.
+Push the feature branch, open a GitHub pull request, and merge only after every conversation is resolved and both required hosted checks pass:
+
+- `Quality` runs formatting, Clippy, Rust tests, and strict OpenSpec validation.
+- `Browser and OpenCode` builds the binary and runs both Node integration suites.
+
+After the GitHub merge, fast-forward the clean primary `master` checkout, verify that it equals `origin/master` and contains the merge, then return the coding-harness session with a verified native workspace transition when one is available.
+Release and deployment operations require separate explicit authorization.
+
+CI uses Rust 1.95.0 and Node.js 26.13.1 with OpenSpec 2.1.0, OpenCode 2.4.2, `chrome-devtools-axi` 0.1.46, and `chrome-devtools-mcp` 1.14.0.
+These are development tools and remain outside the TrueSpec runtime.
 
 TrueSpec itself is developed with OpenSpec.
 Accepted behavior is under [`openspec/specs/`](openspec/specs/).

@@ -104,8 +104,60 @@ Do not claim platform or harness behavior that the executed checks did not verif
 
 ## Delivery
 
+### Authority and scope
+
 - The default branch is `master`.
+- Planning and read-only investigation may happen in the primary checkout, but every repository edit must happen in a dedicated Worktrunk worktree.
+- Own the applicable sequence from requirements and implementation through verification, review, GitHub pull request, merge, safe primary-checkout synchronization, and session return.
+- A plan-only, review-only, PR-only, human-review, or other explicit task limit takes precedence over the complete sequence.
+- A merge does not authorize a release, package publication, deployment, production operation, or other external effect.
 - Keep changes scoped to the active OpenSpec change.
 - Update the relevant OpenSpec artifacts and public README when behavior changes.
-- Review the intended Git diff before committing.
+
+### Isolate and implement
+
+- Before editing, inspect status, worktrees, the actual default branch, and active ownership.
+- Record the primary checkout path and default branch during initial inspection so final synchronization does not depend on rediscovery.
+- Read the installed `wt switch --help` and inspect Worktrunk hooks before creating a worktree.
+- Fetch the intended base and update the primary checkout only with fast-forward semantics when it is safe.
+- Create a dedicated branch and worktree from the intended base with Worktrunk, then verify its path, branch, and merge base before the first edit.
+- Continue related work in its existing worktree instead of creating a competing worktree or moving another task's uncommitted changes.
+- Preserve unrelated user work, local state, review state, credentials, logs, and machine-local records.
+- Never read private environment files or authentication caches.
+- Never commit secrets, local paths, databases, logs, screenshots, build output, or private identifiers.
+
+### Verify and review
+
+- Run the ordinary gate and every applicable browser or OpenCode integration gate before delivery.
+- Reproduce reported bugs through the user-facing path before fixing them.
+- Preserve failing evidence, fix causes rather than weakening checks, and rerun checks invalidated by each fix.
+- Review the complete base-to-head diff.
+- Use the installed Hardlook workflow for every implementation change, record its coverage and limitations, address accepted findings, and rerun invalidated checks.
+- A partial review, failed check, unavailable tool, or passing rerun without a substantiated fix is not clean acceptance.
+
+### Deliver through GitHub
+
+- Review status, all intended commits, and the complete diff before staging only the task's files.
 - Never add an agent identity as a commit co-author.
+- Push the feature branch and open a GitHub pull request.
+- Include decisions, exact-head verification, Hardlook coverage, limitations, and relevant migration or release notes in the pull request.
+- Require the hosted `Quality` and `Browser and OpenCode` checks and resolve every pull-request conversation.
+- Merge through GitHub only after actual required checks and reviews pass.
+- Verify the merged state and exact merge SHA.
+
+### Synchronize and return
+
+- Before synchronizing, inspect the primary checkout for dirty, untracked, ignored, or actively owned files that could collide.
+- Fetch the remote and pull the actual default branch with fast-forward-only semantics when safe.
+- Never stash, reset, clean, force-update, or rebase local divergence to make synchronization succeed.
+- Preserve user-owned files and report any collision or synchronization blocker.
+- Verify that local `master` equals the freshly fetched `origin/master` and contains the merge while retaining any later remote commits.
+- If primary synchronization is blocked, remain in the implementation worktree and report the blocker.
+- After synchronization, use a verified native workspace-move operation when the active coding harness provides one.
+- Invoke a harness workspace move alone at a safe execution boundary, then verify the destination path, branch, HEAD, merge ancestry, and status in a later operation.
+- For OpenCode, use the current Code Mode tool catalog entry `tools.opencode.session.move`; follow its injected schema instead of guessing arguments.
+- Do not substitute shell `cd`, Worktrunk shell integration, or a new harness process for a harness-native session move.
+- Add a future harness mapping only after verifying its native transition tool, exact invocation boundary, and post-transition checks.
+- If no verified native transition is available, remain in the implementation worktree and report the limitation.
+- Do not remove the implementation worktree automatically.
+- Report the pull request, merge SHA, checks, review coverage, primary path, branch, synchronized SHA, and any blocker honestly.
