@@ -14,7 +14,7 @@
 ## 3. Verify and deliver
 
 - [x] 3.1 Extend browser coverage for connection-label absence, compact geometry, composer accessibility, persistence, hidden pending text, and desktop, expanded, and phone layouts.
-- [ ] 3.2 Run the Impeccable detector, complete Rust, OpenSpec, browser, and OpenCode gates, inspect rendered screenshots and the public diff, and complete Hardlook review.
+- [x] 3.2 Run the Impeccable detector, complete Rust, OpenSpec, browser, and OpenCode gates, inspect rendered screenshots and the public diff, and complete Hardlook review.
 
 ## Workflow follow-up
 
