@@ -7,6 +7,8 @@ const {
 const lineComposer = elements["line-composer"];
 const lineComment = elements["line-comment"];
 const generalComposer = elements["general-composer"];
+const generalComposerBody = elements["general-composer-body"];
+const generalComposerToggle = elements["general-composer-toggle"];
 const generalComment = elements["general-comment"];
 const wideLayout = window.matchMedia("(min-width: 60rem)");
 const PANEL_KEYS = {
@@ -15,6 +17,7 @@ const PANEL_KEYS = {
 };
 const DOCUMENT_DISCLOSURE_PREFIX = "truespec.documents.disclosure:";
 const REVIEW_WIDTH_KEY = "truespec.sidebar.review.width";
+const GENERAL_COMPOSER_COLLAPSED_KEY = "truespec.general-composer.collapsed";
 const REVIEW_MIN_REM = 17;
 const REVIEW_MAX_REM = 38;
 const READER_MIN_REM = 22;
@@ -47,6 +50,7 @@ let reviewOpen = true;
 let reviewExpanded = false;
 let reviewWidthPreference = storedReviewWidth();
 let reviewDrag;
+let generalComposerCollapsed = storedGeneralComposerCollapsed();
 
 class RequestError extends Error {
   constructor(message, status, code) {
@@ -115,6 +119,35 @@ function saveReviewWidth(value) {
   } catch {
     /* A private browser may refuse persistence. */
   }
+}
+
+function storedGeneralComposerCollapsed() {
+  try { return localStorage.getItem(GENERAL_COMPOSER_COLLAPSED_KEY) === "true"; }
+  catch { return false; }
+}
+
+function saveGeneralComposerCollapsed(value) {
+  try { localStorage.setItem(GENERAL_COMPOSER_COLLAPSED_KEY, String(value)); }
+  catch { /* A private browser may refuse persistence. */ }
+}
+
+function updateGeneralComposerDisclosure() {
+  const pending = !!generalComment.value.trim();
+  generalComposer.dataset.collapsed = String(generalComposerCollapsed);
+  generalComposer.dataset.pending = String(pending);
+  generalComposerBody.hidden = generalComposerCollapsed;
+  generalComposerToggle.setAttribute("aria-expanded", String(!generalComposerCollapsed));
+  const action = generalComposerCollapsed ? "Expand general feedback" : "Collapse general feedback";
+  const label = generalComposerCollapsed && pending ? `${action}, pending feedback` : action;
+  generalComposerToggle.setAttribute("aria-label", label);
+  generalComposerToggle.title = label;
+}
+
+function toggleGeneralComposer() {
+  generalComposerCollapsed = !generalComposerCollapsed;
+  saveGeneralComposerCollapsed(generalComposerCollapsed);
+  updateGeneralComposerDisclosure();
+  if (!generalComposerCollapsed) generalComment.focus();
 }
 
 function reviewWidthBounds() {
@@ -734,7 +767,6 @@ function renderReview() {
     : "This browser review has ended. Any feedback you sent stays in the local inbox.";
   elements["new-review"].hidden = !!connector;
   elements["new-review"].textContent = board.latest === reviewId ? "Start a new review" : "Open current review";
-  textState("connection", connector ? `Paired with ${connector}` : "");
   elements.handoff.hidden = readonly;
   const list = elements["review-list"];
   const focusKey = document.activeElement?.dataset.focusKey;
@@ -823,6 +855,8 @@ function controls() {
   lineComment.readOnly = busy || readonly;
   generalComposer.hidden = readonly;
   generalComment.disabled = readonly || busy;
+  generalComposerToggle.disabled = readonly || busy;
+  updateGeneralComposerDisclosure();
   elements["cancel-line"].disabled = busy;
   elements["save-comment"].disabled = busy || readonly;
   elements["cancel-comment"].disabled = busy;
@@ -1346,6 +1380,7 @@ generalComposer.addEventListener("submit", event => {
   event.preventDefault();
   void queueGeneralFeedback();
 });
+generalComposerToggle.addEventListener("click", toggleGeneralComposer);
 generalComment.addEventListener("input", controls);
 generalComment.addEventListener("keydown", event => {
   if (!event.isComposing && event.key === "Enter" && !event.shiftKey) {

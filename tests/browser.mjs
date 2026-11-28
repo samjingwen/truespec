@@ -205,7 +205,7 @@ async function exercise(mode, width) {
       "--destination", `browser-${mode}`, "--label", "Browser Test",
     ));
     chrome(["open", viewer.url]);
-    if (width < 500) chrome(["emulate", "--viewport", `${width}x880x1`]);
+    if (width < 500) chrome(["emulate", "--viewport", `${width}x880x1,mobile`]);
     else chrome(["resize", String(width), "880"]);
     if (width >= 960) {
       chrome(["resize", "1024", "880"]);
@@ -296,6 +296,7 @@ async function exercise(mode, width) {
           documentsInert: document.querySelector("#documents-panel").inert,
           readerInert: document.querySelector("#reader").inert,
           backdropHidden: document.querySelector("#sidebar-backdrop").hidden,
+          headerHeight: document.querySelector(".review-head").getBoundingClientRect().height,
           left: review.left,
           right: review.right,
           viewport: innerWidth,
@@ -306,6 +307,7 @@ async function exercise(mode, width) {
         && expandedReviewState.documentsInert
         && expandedReviewState.readerInert
         && expandedReviewState.backdropHidden
+        && expandedReviewState.headerHeight <= 48
         && expandedReviewState.left <= 1
         && expandedReviewState.right >= expandedReviewState.viewport - 1,
         "Expanded Review fills the workspace and removes neighboring surfaces from interaction: "
@@ -423,9 +425,8 @@ async function exercise(mode, width) {
         "Panel controls stay attached to their sidebars instead of the app header");
       check(await page.eval(() => !document.querySelector("#workspace") && !document.querySelector("#source")),
         "The header should contain no workspace or source labels");
-      check(await page.eval(() => !document.querySelector("#agent-help")
-        && document.querySelector("#connection").textContent === "Paired with Browser Test"),
-        "Initialized reviews show their paired integration without a standalone handoff");
+      check(await page.eval(() => !document.querySelector("#agent-help") && !document.querySelector("#connection")),
+        "Initialized reviews omit standalone handoff and redundant connection labels");
       ${mode === "openspec" ? `
         const disclosureDefaults = await page.eval(() => {
           const current = document.querySelector("[data-disclosure-key='openspec:current']");
@@ -587,10 +588,90 @@ async function exercise(mode, width) {
         await page.press("Enter");
         await showPanel("review");
       `}
-      check(await page.eval(() => {
+      const compactControls = await page.eval(() => {
         const buttons = [...document.querySelectorAll("#handoff button")];
-        return buttons.map(button => button.textContent).join("|") === "Send|Send and End" && buttons[0].disabled && !buttons[1].disabled;
-      }), "The review exposes only Send and Send and End, and an empty review can end");
+        const actions = document.querySelector("#handoff").getBoundingClientRect();
+        const buttonRects = buttons.map(button => button.getBoundingClientRect());
+        const toolbar = document.querySelector("#doc-toolbar").getBoundingClientRect();
+        const reader = document.querySelector("#reader").getBoundingClientRect();
+        return {
+          labels: buttons.map(button => button.textContent).join("|"),
+          disabled: buttons.map(button => button.disabled),
+          actionWidth: actions.width,
+          buttonWidths: buttonRects.map(rect => rect.width),
+          buttonHeights: buttonRects.map(rect => rect.height),
+          trailingGap: actions.right - buttonRects.at(-1).right,
+          reviewHeaderHeight: document.querySelector(".review-head").getBoundingClientRect().height,
+          toolbarHeight: toolbar.height,
+          toolbarInset: toolbar.top - reader.top,
+        };
+      });
+      check(compactControls.labels === "Send|Send and End"
+        && compactControls.disabled[0] && !compactControls.disabled[1],
+        "The review exposes only Send and Send and End, and an empty review can end");
+      check(compactControls.buttonWidths.every(width => width < compactControls.actionWidth * 0.6)
+        && compactControls.buttonHeights.every(height => height >= 32 && height <= 40)
+        && Math.abs(compactControls.trailingGap) <= 1,
+        "Send actions are compact, practical targets aligned to the footer edge: "
+          + JSON.stringify(compactControls));
+      check(compactControls.reviewHeaderHeight <= 48
+        && compactControls.toolbarHeight <= 44
+        && compactControls.toolbarInset <= 12,
+        "Review and document control bars preserve content space: " + JSON.stringify(compactControls));
+      const composerDisclosure = await page.eval(() => {
+        const toggle = document.querySelector("#general-composer-toggle");
+        const body = document.querySelector("#general-composer-body");
+        return {
+          expanded: toggle.getAttribute("aria-expanded"),
+          label: toggle.getAttribute("aria-label"),
+          bodyHidden: body.hidden,
+          collapsed: document.querySelector("#general-composer").dataset.collapsed,
+          opacity: Number.parseFloat(getComputedStyle(toggle).opacity),
+        };
+      });
+      check(composerDisclosure.expanded === "true"
+        && composerDisclosure.label === "Collapse general feedback"
+        && !composerDisclosure.bodyHidden && composerDisclosure.collapsed === "false"
+        && (${width < 960} ? composerDisclosure.opacity === 1 : composerDisclosure.opacity > 0),
+        "General feedback starts expanded with an accessible disclosure control: "
+          + JSON.stringify(composerDisclosure));
+      await page.eval(() => document.querySelector("#general-composer-toggle").focus());
+      check(await page.eval(() => document.activeElement.id === "general-composer-toggle"
+        && Number.parseFloat(getComputedStyle(document.activeElement).opacity) === 1),
+        "Keyboard focus reveals the composer disclosure control");
+      await page.click("#general-composer-toggle");
+      check(await page.eval(() => {
+        const form = document.querySelector("#general-composer");
+        const toggle = document.querySelector("#general-composer-toggle");
+        return form.dataset.collapsed === "true"
+          && document.querySelector("#general-composer-body").hidden
+          && toggle.getAttribute("aria-expanded") === "false"
+          && toggle.getAttribute("aria-label") === "Expand general feedback"
+          && localStorage.getItem("truespec.general-composer.collapsed") === "true";
+      }), "Collapsing general feedback hides its body and saves the preference");
+      const collapsedComposerUrl = await page.eval(() => location.href);
+      await page.open(collapsedComposerUrl);
+      await page.wait("#article:not([hidden])");
+      await showPanel("review");
+      check(await page.eval(() => document.querySelector("#general-composer").dataset.collapsed === "true"
+        && document.querySelector("#general-composer-body").hidden),
+        "The collapsed general-feedback preference survives reload");
+      await page.click("#general-composer-toggle");
+      await page.fill("#general-comment", "Pending feedback stays here.");
+      await page.click("#general-composer-toggle");
+      check(await page.eval(() => {
+        const form = document.querySelector("#general-composer");
+        const toggle = document.querySelector("#general-composer-toggle");
+        return form.dataset.collapsed === "true" && form.dataset.pending === "true"
+          && document.querySelector("#general-comment").value === "Pending feedback stays here."
+          && !document.querySelector("#send").disabled
+          && toggle.getAttribute("aria-label") === "Expand general feedback, pending feedback";
+      }), "Collapsed pending feedback stays visible to submission and exposes its hidden state");
+      await page.click("#general-composer-toggle");
+      check(await page.eval(() => document.activeElement.id === "general-comment"
+        && document.querySelector("#general-comment").value === "Pending feedback stays here."),
+        "Expanding general feedback restores the same text and focuses the textarea");
+      await page.fill("#general-comment", "");
       check(await page.eval(() => !document.querySelector(".review-tabs")
         && document.querySelector(".review-empty h3").textContent === "No comments yet"),
         "Review starts as one unified feed without tabs");
@@ -866,6 +947,7 @@ async function exercise(mode, width) {
       await page.click("#review-expand");
       await page.wait("#layout[data-review-expanded='true']");
     `);
+    if (screenshots) chrome(["screenshot", join(screenshots, `truespec-${mode}-expanded-review.png`)]);
     const previous = viewer.review;
     await stop(viewer);
     viewer = await start(root, mode);
@@ -926,7 +1008,7 @@ async function exercise(mode, width) {
       })), "Display a labeled working spinner while paired delivery is pending");
     `);
     if (mode === "openspec") {
-      chrome(["emulate", "--viewport", "390x880x1"]);
+      chrome(["emulate", "--viewport", "390x880x1,mobile"]);
       script(`
         await showPanel("documents");
         const phoneHierarchy = await page.eval(() => {
@@ -1044,15 +1126,19 @@ async function verifyPendingGeneralSubmission() {
     script(`
       await showPanel("review");
       await page.fill("#general-comment", "Send directly.");
+      await page.click("#general-composer-toggle");
       check(await page.eval(() => !document.querySelector("#send").disabled
-        && document.querySelector("#shortcut-count").textContent === "0"),
-        "Typed general feedback enables Send without Enter");
+        && document.querySelector("#shortcut-count").textContent === "0"
+        && document.querySelector("#general-composer").dataset.collapsed === "true"),
+        "Collapsed typed general feedback enables Send without Enter");
       await page.click("#send");
       await page.wait("#review-list > .annotation");
       check(await page.eval(() => document.querySelector("#general-comment").value === ""
         && document.querySelector("#review-list > .annotation p").textContent === "Send directly."
-        && document.querySelector("#review-list > .annotation").classList.contains("draft") === false),
-        "Send submits pending general feedback directly and clears only after success");
+        && document.querySelector("#review-list > .annotation").classList.contains("draft") === false
+        && document.querySelector("#general-composer").dataset.collapsed === "true"),
+        "Send submits collapsed pending feedback directly and clears only after success");
+      await page.click("#general-composer-toggle");
     `);
     const first = JSON.parse(run(
       "connector", "poll", "--connection", binding.connection_id, "--wait", "0",
@@ -1075,9 +1161,11 @@ async function verifyPendingGeneralSubmission() {
       await page.press("Enter");
       await page.wait("#review-list > .annotation:nth-child(2)");
       await page.fill("#general-comment", "apply");
+      await page.click("#general-composer-toggle");
       check(await page.eval(() => !document.querySelector("#send").disabled
-        && !document.querySelector("#send-end").disabled),
-        "Pending final text remains sendable alongside a queued draft");
+        && !document.querySelector("#send-end").disabled
+        && document.querySelector("#general-composer").dataset.collapsed === "true"),
+        "Collapsed final text remains sendable alongside a queued draft");
       await page.eval(() => {
         const nativeFetch = window.fetch.bind(window);
         window.__nativeFetch = nativeFetch;
@@ -1096,8 +1184,9 @@ async function verifyPendingGeneralSubmission() {
       await page.click("#send-end");
       await page.wait("#error:not([hidden])");
       check(await page.eval(() => document.querySelector("#general-comment").value === "apply"
-        && !document.querySelector("#send-end").disabled),
-        "A failed submit preserves final general feedback for retry");
+        && !document.querySelector("#send-end").disabled
+        && document.querySelector("#general-composer").dataset.collapsed === "true"),
+        "A failed submit preserves collapsed final feedback for retry");
       await page.click("#send-end");
       await page.wait("#ended:not([hidden])");
       check(await page.eval(() => document.querySelector("#general-comment").value === ""

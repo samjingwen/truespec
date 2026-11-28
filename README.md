@@ -29,7 +29,7 @@ It reads OpenSpec artifacts in place and adds a review and agent-handoff layer a
 - **OpenSpec-aware navigation:** current specifications, active changes under **Changes**, archived changes under **Archives**, and nested `delta` documents remain distinct.
 - **Plain Markdown source:** point TrueSpec at any Markdown directory without installing OpenSpec.
 - **Precise annotations:** target a Markdown source line, paragraph, whole list, section, or exact rendered text selection.
-- **General feedback:** queue comments that have no document annotation.
+- **General feedback:** queue comments without a document annotation from a compact composer that can collapse without losing pending text.
 - **Cross-document review feed:** drafts and submitted feedback remain in one chronological list.
 - **Conservative re-anchoring:** reliable unique matches relocate after edits; ambiguous targets become **Outdated** instead of attaching to the wrong text.
 - **Durable batching:** feedback is committed before the browser reports success and remains queued while no agent is connected.
