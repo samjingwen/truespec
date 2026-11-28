@@ -80,14 +80,6 @@ function promptText(batch: Extract<Delivery, { event: "batch" }>, workspace: str
   ].join("\n");
 }
 
-function openBrowser(url: string) {
-  if (process.env.TRUESPEC_NO_OPEN === "1") return;
-  const command = process.platform === "darwin" ? "open" : process.platform === "win32" ? "explorer.exe" : "xdg-open";
-  const child = spawn(command, [url], { stdio: "ignore", windowsHide: true });
-  child.on("error", () => { /* The chat note also contains the URL. */ });
-  child.unref();
-}
-
 export default Plugin.define({
   id: "truespec",
   async setup(ctx) {
@@ -327,10 +319,10 @@ export default Plugin.define({
           }
           await changeBindings(known => [...known.filter(item => item.connection_id !== binding.connection_id), binding]);
           bridge(binding);
-          openBrowser(url.href);
+          const reviewURLs = url.href === local.href ? [local.href] : [url.href, local.href];
           await ctx.session.synthetic({
             sessionID,
-            text: `TrueSpec review: ${url.href}`,
+            text: reviewURLs.join("\n"),
             description: "TrueSpec review opened",
             resume: false,
           });

@@ -231,6 +231,15 @@ In an OpenCode V2 chat located at the initialized repository root:
 The command takes no arguments.
 It reads `truespec/config/project.json`, ensures the shared service is healthy, and opens or resumes one workspace-scoped review paired with that exact OpenCode chat and worktree.
 Several initialized repositories can keep independent reviews open through the same service.
+It does not open a browser automatically.
+Its response contains only the available review URL lines.
+Local mode reports the loopback URL once.
+Tailnet mode reports the tailnet URL first and the loopback URL second.
+
+```text
+https://device.example.ts.net:8443/w/<workspace>/?review=<review>
+http://127.0.0.1:47371/w/<workspace>/?review=<review>
+```
 
 The iterative loop is:
 
