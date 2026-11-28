@@ -17,7 +17,7 @@ The browser SHALL render that structure without parsing separators or source-spe
 #### Scenario: Structure nested OpenSpec artifacts
 
 - **WHEN** a change, archive, delta, unfamiliar artifact, or custom-schema artifact contains nested directories
-- **THEN** the OpenSpec adapter emits one navigation segment for every semantic or real directory level
+- **THEN** the OpenSpec adapter emits shared **Changes** or **Archives** lifecycle segments, one named change or archive segment, and one segment for every remaining semantic or real directory level
 - **AND** it preserves the artifact's real source path
 
 #### Scenario: Structure plain Markdown directories
@@ -60,3 +60,34 @@ The browser SHALL remember each disclosure's state locally.
 
 - **WHEN** the Documents panel is shown on a narrow viewport
 - **THEN** every hierarchy level retains the same disclosure, keyboard, and persistence behavior as desktop
+
+## MODIFIED Requirements
+
+### Requirement: OpenSpec document groups
+
+TrueSpec SHALL distinguish current specifications, active change artifacts, change deltas, and archived change artifacts.
+It SHALL display each Markdown artifact in place without merging deltas or changing workflow state.
+
+#### Scenario: Read a current spec and its proposed delta
+
+- **WHEN** `openspec/specs/` and an active `openspec/changes/` directory contain specifications for the same capability
+- **THEN** the reader lists them as distinct documents and renders the contents of each independently
+
+#### Scenario: Read an unfamiliar or incomplete artifact
+
+- **WHEN** an active change contains an unfamiliar Markdown artifact or an unfinished proposal
+- **THEN** the reader lists the readable file without requiring a known schema or a complete change
+
+#### Scenario: Group active and archived changes
+
+- **WHEN** the workspace contains one or more active changes and archived changes
+- **THEN** the sidebar places named active changes under one expanded **Changes** disclosure
+- **AND** it places named archived changes under one expanded **Archives** disclosure
+- **AND** the semantic roots appear in **Current specifications**, **Changes**, **Archives** order
+- **AND** named active changes are open by default while named archived changes are closed by default
+
+#### Scenario: Navigate one change and its deltas
+
+- **WHEN** an active change contains ordinary artifacts and one or more delta specifications
+- **THEN** the sidebar groups ordinary artifacts under **Changes** > **<name>**
+- **AND** it groups capability names under one expanded **delta** folder without changing their source paths

@@ -5,9 +5,6 @@ Review project documentation with the precision of a code review, then hand the 
 TrueSpec is a local-first Rust CLI that serves existing Markdown in a browser, lets you annotate exact source context, collects comments across documents, and delivers durable feedback batches to coding agents.
 OpenSpec is the first structured document source, and ordinary Markdown folders work through the same review core.
 
-> **Project status:** TrueSpec is an experimental MVP.
-> Its storage schema, connector protocol, and command surface may change before the first stable release.
-
 ## Why TrueSpec
 
 Long chat messages lose the relationship between feedback and the document text they discuss.
@@ -29,7 +26,7 @@ It reads OpenSpec artifacts in place and adds a review and agent-handoff layer a
 
 ## Features
 
-- **OpenSpec-aware navigation:** current specifications, active change artifacts, nested `delta/` documents, and archived artifacts remain distinct.
+- **OpenSpec-aware navigation:** current specifications, active changes under **Changes**, archived changes under **Archives**, and nested `delta` documents remain distinct.
 - **Plain Markdown source:** point TrueSpec at any Markdown directory without installing OpenSpec.
 - **Precise annotations:** target a Markdown source line, paragraph, whole list, section, or exact rendered text selection.
 - **General feedback:** queue comments that have no document annotation.
