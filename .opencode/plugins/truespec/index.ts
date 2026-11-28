@@ -320,10 +320,11 @@ export default Plugin.define({
           await changeBindings(known => [...known.filter(item => item.connection_id !== binding.connection_id), binding]);
           bridge(binding);
           const reviewURLs = url.href === local.href ? [local.href] : [url.href, local.href];
+          const reviewText = reviewURLs.join("\n");
           await ctx.session.synthetic({
             sessionID,
-            text: reviewURLs.join("\n"),
-            description: "TrueSpec review opened",
+            text: reviewText,
+            description: reviewText,
             resume: false,
           });
         },
